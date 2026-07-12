@@ -1,177 +1,98 @@
-// Core domain types for Pavan Full Stack App Builder
+// Minimal domain types for Pavan — autonomous AI software creator
 
-export type ProjectType =
-  | "web"
+export type ProjectKind =
   | "windows"
+  | "web"
   | "android"
+  | "api"
+  | "service"
   | "library"
   | "cli"
-  | "desktop-utility"
   | "ai-agent"
-  | "local-service"
   | "plugin"
   | "sdk"
   | "game"
-  | "installer"
-  | "automation";
+  | "automation"
+  | "auto";
 
-export type ProjectStack =
-  | "WinUI 3"
-  | "WPF"
-  | "WinForms"
-  | "Avalonia"
-  | "Tauri"
-  | "Electron"
-  | "Win32"
-  | ".NET"
-  | "Rust"
-  | "C++"
-  | "C#"
-  | "React"
-  | "Next.js"
-  | "Node.js"
-  | "Kotlin"
-  | "Flutter"
-  | "Python"
-  | "Go"
-  | "TypeScript";
-
-export type AgentRole =
-  | "planner"
-  | "architect"
-  | "coder"
-  | "reviewer"
-  | "tester"
-  | "debugger"
-  | "security"
-  | "docs"
-  | "release";
-
-export type AgentStatus = "idle" | "thinking" | "working" | "waiting" | "done" | "error";
-
-export type TaskStatus = "backlog" | "planning" | "in-progress" | "review" | "testing" | "done";
-
-export type TaskPriority = "low" | "medium" | "high" | "critical";
-
-export interface Project {
+export interface ProjectMeta {
   id: string;
   name: string;
-  type: ProjectType;
-  stacks: ProjectStack[];
+  kind: ProjectKind;
+  stack: string; // chosen by the engine, e.g. "WinUI 3 + .NET 8"
   description: string;
-  path: string;
   createdAt: string;
-  updatedAt: string;
-  status: "initialized" | "planning" | "implementing" | "testing" | "ready" | "deployed";
-  progress: number;
-  requirements: string;
-  repository?: string;
-  branch: string;
-  targetPlatform: string;
+  prompt: string; // original natural-language requirement
 }
 
-export interface Agent {
-  id: string;
-  role: AgentRole;
-  name: string;
-  status: AgentStatus;
-  model: string;
-  currentTask?: string;
-  tokensUsed: number;
-  tasksCompleted: number;
-  lastActive: string;
-  description: string;
-}
-
-export interface Task {
-  id: string;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  priority: TaskPriority;
-  assignedAgent?: AgentRole;
-  projectId: string;
-  subtasks?: { id: string; title: string; done: boolean }[];
-  createdAt: string;
-  estimateHours: number;
-  tags: string[];
-}
-
-export interface FileNode {
-  id: string;
-  name: string;
-  type: "file" | "folder";
-  path: string;
-  language?: string;
-  children?: FileNode[];
-  status?: "clean" | "modified" | "added" | "staged";
-  size?: number;
-}
+export type ChatRole = "user" | "assistant" | "system";
 
 export interface ChatMessage {
   id: string;
-  role: "user" | "assistant" | "agent" | "system";
-  agentRole?: AgentRole;
+  role: ChatRole;
   content: string;
-  timestamp: string;
+  timestamp: number;
   streaming?: boolean;
-  actions?: { label: string; type: string }[];
+  // lightweight structured "behind the scenes" note attached to assistant turns
+  activity?: string;
 }
 
-export interface MemoryEntry {
-  id: string;
-  category: "architecture" | "decision" | "preference" | "context" | "pattern" | "constraint";
-  title: string;
-  content: string;
-  confidence: number;
-  createdAt: string;
-  source: "user" | "agent" | "inferred";
-  pinned: boolean;
+export type StageId =
+  | "analyze"
+  | "plan"
+  | "architect"
+  | "generate"
+  | "build"
+  | "test"
+  | "package"
+  | "ready";
+
+export type StageStatus = "pending" | "running" | "done" | "failed";
+
+export interface PipelineStage {
+  id: StageId;
+  label: string;
+  description: string;
+  status: StageStatus;
+  detail?: string;
+  durationMs?: number;
 }
 
-export interface Diagnostic {
+export interface Artifact {
   id: string;
-  severity: "error" | "warning" | "info" | "hint";
-  message: string;
-  file: string;
-  line: number;
-  column: number;
-  code: string;
-  rule?: string;
+  name: string;
+  kind: "app" | "installer" | "package" | "docs" | "source";
+  platform: string; // e.g. Windows, Web, Android
+  sizeLabel: string;
+  ready: boolean;
+  url?: string;
 }
 
-export interface LogEntry {
+export interface LogLine {
   id: string;
+  ts: string;
   level: "debug" | "info" | "warn" | "error" | "success";
   source: string;
   message: string;
-  timestamp: string;
-}
-
-export interface BuildStep {
-  id: string;
-  label: string;
-  status: "pending" | "running" | "success" | "failed" | "skipped";
-  duration?: number;
-  log?: string;
-}
-
-export interface Plugin {
-  id: string;
-  name: string;
-  description: string;
-  version: string;
-  author: string;
-  enabled: boolean;
-  category: "provider" | "tool" | "mcp" | "template" | "integration";
-  icon: string;
 }
 
 export interface ModelProvider {
   id: string;
   name: string;
   type: "local" | "remote";
-  models: { id: string; name: string; context: string; capabilities: string[] }[];
-  status: "connected" | "disconnected" | "error";
-  endpoint?: string;
+  model: string;
+  status: "connected" | "disconnected";
 }
+
+export interface AISettings {
+  providerId: string;
+  model: string;
+  autonomy: "guided" | "autonomous" | "supervised";
+  autoDetectKind: boolean;
+  selfHeal: boolean;
+  generateTests: boolean;
+  generateDocs: boolean;
+  offlineFirst: boolean;
+}
+
+export type PreviewTarget = "web" | "windows" | "android";

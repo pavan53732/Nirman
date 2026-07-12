@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
-import { ThemeProvider } from "@/components/ide/theme-provider";
+import { Toaster as SonnerToaster } from "@/components/ui/sonner";
+import { ThemeProvider } from "@/components/pavan/theme-provider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -15,28 +16,28 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Pavan Full Stack App Builder — Autonomous Software Engineering Platform",
+  title: "Pavan — Autonomous AI Software Creator",
   description:
-    "A fully autonomous software engineering platform that designs, implements, tests, debugs, packages, deploys, and maintains any software project from natural-language requirements.",
+    "Pavan is an autonomous AI software creator that turns natural-language ideas into complete, production-ready applications — Windows desktop, web, Android, APIs, CLIs, agents and more. Describe it; the engine plans, builds, tests, and packages it.",
   keywords: [
     "Pavan",
-    "autonomous software engineering",
-    "multi-agent",
+    "autonomous AI software creator",
+    "app generator",
     "WinUI 3",
     "WPF",
     "Tauri",
     "Electron",
     "Android",
-    "full stack",
-    "AI agents",
+    "Next.js",
+    "natural language to app",
   ],
   authors: [{ name: "Pavan Labs" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "Pavan Full Stack App Builder",
-    description: "Autonomous software engineering from natural-language requirements.",
+    title: "Pavan — Autonomous AI Software Creator",
+    description: "Turn natural-language ideas into complete, production-ready applications.",
     siteName: "Pavan",
     type: "website",
   },
@@ -54,6 +55,7 @@ export default function RootLayout({
       >
         <ThemeProvider>{children}</ThemeProvider>
         <Toaster />
+        <SonnerToaster position="bottom-right" theme="dark" />
       </body>
     </html>
   );

@@ -1,256 +1,290 @@
 import { create } from "zustand";
 import type {
-  Project,
-  Agent,
-  Task,
-  FileNode,
+  ProjectMeta,
   ChatMessage,
-  MemoryEntry,
-  Diagnostic,
-  LogEntry,
-  BuildStep,
-  Plugin,
-  ModelProvider,
-  AgentRole,
-  TaskStatus,
+  PipelineStage,
+  Artifact,
+  LogLine,
+  AISettings,
+  PreviewTarget,
+  StageId,
+  StageStatus,
 } from "./types";
 import {
-  seedProjects,
-  seedAgents,
-  seedTasks,
-  seedFileTree,
-  seedChat,
-  seedMemory,
-  seedDiagnostics,
-  seedLogs,
-  seedBuildSteps,
-  seedPlugins,
+  initialStages,
   seedProviders,
+  defaultSettings,
+  seedProjects,
+  seedChat,
+  seedLogs,
+  stageOrder,
+  stageDetails,
+  makeArtifacts,
 } from "./mock-data";
 
-export type ActivityView =
-  | "explorer"
-  | "search"
-  | "git"
-  | "agents"
-  | "memory"
-  | "architecture"
-  | "plugins"
-  | "prompt"
-  | "providers"
-  | "settings";
-
-export type MainTab =
-  | "code"
-  | "architecture"
-  | "tasks"
-  | "preview"
-  | "monitor"
-  | "performance";
-
-export type BottomTab = "terminal" | "build" | "diagnostics" | "logs";
-
-interface IDEState {
-  // Data
-  projects: Project[];
-  agents: Agent[];
-  tasks: Task[];
-  fileTree: FileNode[];
-  chat: ChatMessage[];
-  memory: MemoryEntry[];
-  diagnostics: Diagnostic[];
-  logs: LogEntry[];
-  buildSteps: BuildStep[];
-  plugins: Plugin[];
-  providers: ModelProvider[];
-
-  // UI state
+interface AppState {
+  // data
+  projects: ProjectMeta[];
   activeProjectId: string;
-  activityView: ActivityView;
-  mainTab: MainTab;
-  bottomTab: BottomTab;
-  activeFile: string;
-  openFiles: string[];
-  sidebarCollapsed: boolean;
-  chatCollapsed: boolean;
-  bottomCollapsed: boolean;
-  selectedTaskId: string | null;
-  isRunning: boolean;
-  commandPaletteOpen: boolean;
-  newProjectOpen: boolean;
-  theme: "dark" | "light";
-  previewTarget: "web" | "windows" | "android";
+  chat: ChatMessage[];
+  stages: PipelineStage[];
+  artifacts: Artifact[];
+  logs: LogLine[];
+  providers: typeof seedProviders;
+  settings: AISettings;
+  previewTarget: PreviewTarget;
+  previewReady: boolean;
+  hotReloading: boolean;
 
-  // Actions
+  // ui
+  settingsOpen: boolean;
+  logsOpen: boolean;
+  isBuilding: boolean;
+  input: string;
+  streaming: boolean;
+
+  // actions
   setActiveProject: (id: string) => void;
-  setActivityView: (v: ActivityView) => void;
-  setMainTab: (t: MainTab) => void;
-  setBottomTab: (t: BottomTab) => void;
-  openFile: (path: string) => void;
-  closeFile: (path: string) => void;
-  toggleSidebar: () => void;
-  toggleChat: () => void;
-  toggleBottom: () => void;
-  selectTask: (id: string | null) => void;
-  addChatMessage: (m: ChatMessage) => void;
+  setInput: (v: string) => void;
+  addMessage: (m: ChatMessage) => void;
   appendToMessage: (id: string, chunk: string) => void;
-  setMessageContent: (id: string, content: string) => void;
-  moveTask: (taskId: string, status: TaskStatus) => void;
-  addTask: (t: Task) => void;
-  updateTask: (id: string, patch: Partial<Task>) => void;
-  togglePlugin: (id: string) => void;
-  toggleMemoryPin: (id: string) => void;
-  addMemory: (m: MemoryEntry) => void;
-  setRunning: (v: boolean) => void;
-  advanceBuild: () => void;
-  resetBuild: () => void;
-  setCommandPaletteOpen: (v: boolean) => void;
-  setNewProjectOpen: (v: boolean) => void;
-  setTheme: (t: "dark" | "light") => void;
-  setPreviewTarget: (t: "web" | "windows" | "android") => void;
-  addProject: (p: Project) => void;
-  log: (level: LogEntry["level"], source: string, message: string) => void;
+  finalizeMessage: (id: string) => void;
+  setStreaming: (v: boolean) => void;
+  startBuild: (prompt: string) => void;
+  setStage: (id: StageId, patch: Partial<PipelineStage>) => void;
+  resetStages: () => void;
+  advanceStage: () => void;
+  setArtifactsReady: (ready: boolean) => void;
+  setPreviewTarget: (t: PreviewTarget) => void;
+  setPreviewReady: (v: boolean) => void;
+  setHotReloading: (v: boolean) => void;
+  addLog: (level: LogLine["level"], source: string, message: string) => void;
+  updateSettings: (patch: Partial<AISettings>) => void;
+  setSettingsOpen: (v: boolean) => void;
+  setLogsOpen: (v: boolean) => void;
+  addProject: (p: ProjectMeta) => void;
+  clearChat: () => void;
 }
 
-export const useIDE = create<IDEState>((set) => ({
-  projects: seedProjects,
-  agents: seedAgents,
-  tasks: seedTasks,
-  fileTree: seedFileTree,
-  chat: seedChat,
-  memory: seedMemory,
-  diagnostics: seedDiagnostics,
-  logs: seedLogs,
-  buildSteps: seedBuildSteps,
-  plugins: seedPlugins,
-  providers: seedProviders,
+let logCounter = 1000;
 
-  activeProjectId: "proj-1",
-  activityView: "explorer",
-  mainTab: "code",
-  bottomTab: "build",
-  activeFile: "src/Invoicing/RecurringInvoiceService.cs",
-  openFiles: [
-    "src/Invoicing/RecurringInvoiceService.cs",
-    "src/Invoicing/InvoiceGenerator.cs",
-    "tests/RecurringInvoiceServiceTests.cs",
-    "docs/architecture.md",
-  ],
-  sidebarCollapsed: false,
-  chatCollapsed: false,
-  bottomCollapsed: false,
-  selectedTaskId: null,
-  isRunning: false,
-  commandPaletteOpen: false,
-  newProjectOpen: false,
-  theme: "dark",
+export const useApp = create<AppState>((set, get) => ({
+  projects: seedProjects,
+  activeProjectId: seedProjects[0].id,
+  chat: seedChat,
+  stages: initialStages.map((s) => ({ ...s })),
+  artifacts: makeArtifacts(seedProjects[0].name, seedProjects[0].kind),
+  logs: seedLogs,
+  providers: seedProviders,
+  settings: defaultSettings,
   previewTarget: "windows",
+  previewReady: false,
+  hotReloading: false,
+
+  settingsOpen: false,
+  logsOpen: false,
+  isBuilding: false,
+  input: "",
+  streaming: false,
 
   setActiveProject: (id) =>
-    set({ activeProjectId: id }),
-  setActivityView: (v) =>
-    set((s) => ({ activityView: s.activityView === v && !s.sidebarCollapsed ? s.activityView : v, sidebarCollapsed: false })),
-  setMainTab: (t) => set({ mainTab: t }),
-  setBottomTab: (t) => set({ bottomTab: t, bottomCollapsed: false }),
-  openFile: (path) =>
-    set((s) => ({
-      activeFile: path,
-      openFiles: s.openFiles.includes(path) ? s.openFiles : [...s.openFiles, path],
-    })),
-  closeFile: (path) =>
     set((s) => {
-      const openFiles = s.openFiles.filter((p) => p !== path);
-      const activeFile = s.activeFile === path ? openFiles[openFiles.length - 1] ?? "" : s.activeFile;
-      return { openFiles, activeFile };
+      const p = s.projects.find((x) => x.id === id);
+      return {
+        activeProjectId: id,
+        artifacts: p ? makeArtifacts(p.name, p.kind) : s.artifacts,
+        previewTarget: p?.kind === "android" ? "android" : p?.kind === "web" ? "web" : "windows",
+      };
     }),
-  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
-  toggleChat: () => set((s) => ({ chatCollapsed: !s.chatCollapsed })),
-  toggleBottom: () => set((s) => ({ bottomCollapsed: !s.bottomCollapsed })),
-  selectTask: (id) => set({ selectedTaskId: id }),
-  addChatMessage: (m) => set((s) => ({ chat: [...s.chat, m] })),
+
+  setInput: (v) => set({ input: v }),
+
+  addMessage: (m) => set((s) => ({ chat: [...s.chat, m] })),
   appendToMessage: (id, chunk) =>
     set((s) => ({
       chat: s.chat.map((m) => (m.id === id ? { ...m, content: m.content + chunk } : m)),
     })),
-  setMessageContent: (id, content) =>
+  finalizeMessage: (id) =>
     set((s) => ({
-      chat: s.chat.map((m) => (m.id === id ? { ...m, content } : m)),
+      chat: s.chat.map((m) => (m.id === id ? { ...m, streaming: false } : m)),
     })),
-  moveTask: (taskId, status) =>
-    set((s) => ({ tasks: s.tasks.map((t) => (t.id === taskId ? { ...t, status } : t)) })),
-  addTask: (t) => set((s) => ({ tasks: [...s.tasks, t] })),
-  updateTask: (id, patch) =>
-    set((s) => ({ tasks: s.tasks.map((t) => (t.id === id ? { ...t, ...patch } : t)) })),
-  togglePlugin: (id) =>
+  setStreaming: (v) => set({ streaming: v }),
+
+  startBuild: (prompt) => {
+    const state = get();
+    const kind = inferKind(prompt);
+    const stack = inferStack(kind, prompt);
+    const name = inferName(prompt) || "New Project";
+    const project: ProjectMeta = {
+      id: `proj-${Date.now()}`,
+      name,
+      kind: state.settings.autoDetectKind ? kind : "auto",
+      stack,
+      description: prompt.slice(0, 120),
+      createdAt: new Date().toISOString(),
+      prompt,
+    };
     set((s) => ({
-      plugins: s.plugins.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p)),
-    })),
-  toggleMemoryPin: (id) =>
+      projects: [project, ...s.projects],
+      activeProjectId: project.id,
+      artifacts: makeArtifacts(name, kind),
+      previewReady: false,
+      isBuilding: true,
+      previewTarget: kind === "android" ? "android" : kind === "web" ? "web" : "windows",
+    }));
+    // reset stages and immediately start the first one
+    set({ stages: initialStages.map((st, i) => ({ ...st, status: i === 0 ? "running" : "pending", detail: undefined, durationMs: undefined })) });
+    get().addLog("info", "engine", `New project: ${name} · ${stack}`);
+  },
+
+  setStage: (id, patch) =>
     set((s) => ({
-      memory: s.memory.map((m) => (m.id === id ? { ...m, pinned: !m.pinned } : m)),
+      stages: s.stages.map((st) => (st.id === id ? { ...st, ...patch } : st)),
     })),
-  addMemory: (m) => set((s) => ({ memory: [m, ...s.memory] })),
-  setRunning: (v) => set({ isRunning: v }),
-  advanceBuild: () =>
-    set((s) => {
-      const steps = [...s.buildSteps];
-      const runningIdx = steps.findIndex((st) => st.status === "running");
-      const pendingIdx = steps.findIndex((st) => st.status === "pending");
-      if (runningIdx >= 0) {
-        steps[runningIdx] = { ...steps[runningIdx], status: "success", duration: 3 + Math.random() * 5 };
-      }
-      if (pendingIdx >= 0) {
-        steps[pendingIdx] = { ...steps[pendingIdx], status: "running" };
-      }
-      return { buildSteps: steps };
-    }),
-  resetBuild: () =>
-    set((s) => ({
-      buildSteps: s.buildSteps.map((st, i) => ({
-        ...st,
-        status: i === 0 ? "running" : "pending",
-        duration: undefined,
-      })),
-      isRunning: true,
-    })),
-  setCommandPaletteOpen: (v) => set({ commandPaletteOpen: v }),
-  setNewProjectOpen: (v) => set({ newProjectOpen: v }),
-  setTheme: (t) => set({ theme: t }),
+
+  resetStages: () =>
+    set({ stages: initialStages.map((s) => ({ ...s, status: "pending", detail: undefined, durationMs: undefined })) }),
+
+  advanceStage: () => {
+    const state = get();
+    const stages = state.stages;
+    const currentIdx = stages.findIndex((s) => s.status === "running");
+    const nextIdx = stages.findIndex((s) => s.status === "pending");
+
+    const updated = stages.map((s) => ({ ...s }));
+    if (currentIdx >= 0) {
+      updated[currentIdx] = {
+        ...updated[currentIdx],
+        status: "done",
+        durationMs: 800 + Math.floor(Math.random() * 1600),
+        detail: stageDetails[updated[currentIdx].id]?.[0],
+      };
+    }
+    if (nextIdx >= 0) {
+      updated[nextIdx] = { ...updated[nextIdx], status: "running" };
+      get().addLog("info", updated[nextIdx].id, `${updated[nextIdx].label}: ${updated[nextIdx].description}`);
+    } else {
+      // all done
+      get().setArtifactsReady(true);
+      get().setPreviewReady(true);
+      get().addLog("success", "engine", "All stages complete. Deliverables ready.");
+      set({ isBuilding: false });
+    }
+    set({ stages: updated });
+  },
+
+  setArtifactsReady: (ready) =>
+    set((s) => ({ artifacts: s.artifacts.map((a) => ({ ...a, ready })) })),
+
   setPreviewTarget: (t) => set({ previewTarget: t }),
-  addProject: (p) => set((s) => ({ projects: [...s.projects, p], activeProjectId: p.id })),
-  log: (level, source, message) =>
+  setPreviewReady: (v) => set({ previewReady: v }),
+  setHotReloading: (v) => set({ hotReloading: v }),
+
+  addLog: (level, source, message) =>
     set((s) => ({
       logs: [
-        ...s.logs.slice(-200),
+        ...s.logs.slice(-150),
         {
-          id: `l-${Date.now()}`,
+          id: `l-${logCounter++}`,
+          ts: new Date().toLocaleTimeString("en-GB"),
           level,
           source,
           message,
-          timestamp: new Date().toLocaleTimeString("en-GB"),
         },
       ],
     })),
+
+  updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
+  setSettingsOpen: (v) => set({ settingsOpen: v }),
+  setLogsOpen: (v) => set({ logsOpen: v }),
+
+  addProject: (p) => set((s) => ({ projects: [p, ...s.projects], activeProjectId: p.id })),
+  clearChat: () => set({ chat: seedChat }),
 }));
 
-// Selectors / helpers
-export const agentRoleMeta: Record<AgentRole, { label: string; icon: string; color: string }> = {
-  planner: { label: "Planner", icon: "list-checks", color: "amber" },
-  architect: { label: "Architect", icon: "drafting-compass", color: "emerald" },
-  coder: { label: "Coder", icon: "code", color: "sky" },
-  reviewer: { label: "Reviewer", icon: "scan-search", color: "violet" },
-  tester: { label: "Tester", icon: "flask-conical", color: "rose" },
-  debugger: { label: "Debugger", icon: "bug", color: "orange" },
-  security: { label: "Security", icon: "shield-check", color: "red" },
-  docs: { label: "Docs", icon: "book-open", color: "teal" },
-  release: { label: "Release", icon: "package", color: "cyan" },
-};
+// Lightweight requirement reasoning — the engine picks a generator + toolchain.
+function inferKind(prompt: string): ProjectMeta["kind"] {
+  const p = prompt.toLowerCase();
+  if (/(windows|desktop|winui|wpf|winforms|\.net\s*(desktop|app)|win32)/.test(p)) return "windows";
+  if (/(android|mobile app|kotlin|flutter|play store)/.test(p)) return "android";
+  if (/(cli|command.line|terminal tool|brew install|cargo install)/.test(p)) return "cli";
+  if (/(api|rest|graphql|backend service|microservice)/.test(p)) return "api";
+  if (/(library|sdk|package for|npm package|crate)/.test(p)) return "library";
+  if (/(ai agent|autonomous agent|assistant service|chatbot)/.test(p)) return "ai-agent";
+  if (/(game|unity|godot|2d platformer|3d)/.test(p)) return "game";
+  if (/(automation|workflow|cron|batch|scrape)/.test(p)) return "automation";
+  if (/(marketing site|landing page|website|blog|portfolio|saas)/.test(p)) return "web";
+  return "web";
+}
 
-export const taskColumns: { id: TaskStatus; label: string; tint: string }[] = [
-  { id: "backlog", label: "Backlog", tint: "zinc" },
-  { id: "planning", label: "Planning", tint: "amber" },
-  { id: "in-progress", label: "In Progress", tint: "emerald" },
-  { id: "review", label: "Review", tint: "violet" },
-  { id: "testing", label: "Testing", tint: "rose" },
-  { id: "done", label: "Done", tint: "teal" },
-];
+function inferStack(kind: ProjectMeta["kind"], prompt: string): string {
+  const p = prompt.toLowerCase();
+  switch (kind) {
+    case "windows":
+      if (/tauri/.test(p)) return "Tauri + Rust";
+      if (/electron/.test(p)) return "Electron + TypeScript";
+      if (/avalonia/.test(p)) return "Avalonia + C#";
+      if (/(winforms|windows forms)/.test(p)) return "WinForms + .NET 8";
+      if (/(wpf)/.test(p)) return "WPF + .NET 8";
+      return "WinUI 3 + .NET 8";
+    case "android":
+      if (/(flutter|dart)/.test(p)) return "Flutter + Kotlin modules";
+      return "Kotlin + Jetpack Compose";
+    case "web":
+      if (/(wordpress|cms)/.test(p)) return "Next.js + Headless CMS";
+      return "Next.js + Node.js";
+    case "cli":
+      if (/(rust|cargo)/.test(p)) return "Rust + clap";
+      if (/(go\b|golang)/.test(p)) return "Go + cobra";
+      return "TypeScript + Commander";
+    case "api":
+      return "Node.js + Fastify + Prisma";
+    case "library":
+      if (/(rust|crate)/.test(p)) return "Rust crate";
+      return "TypeScript library";
+    case "ai-agent":
+      return "Python + LangGraph";
+    case "game":
+      return "Godot + GDScript";
+    case "automation":
+      return "Node.js + Playwright";
+    default:
+      return "TypeScript";
+  }
+}
+
+function inferName(prompt: string): string {
+  // Strip leading filler words repeatedly (build, create, make, a, an, the, i want, i need)
+  let trimmed = prompt.trim().toLowerCase();
+  let prev = "";
+  while (prev !== trimmed) {
+    prev = trimmed;
+    trimmed = trimmed.replace(
+      /^(build|create|make|generate|develop|i want|i need|please|a|an|the|me|some)\s+/i,
+      ""
+    );
+  }
+  // Collect up to 3 meaningful words, stopping at common stopwords/prepositions
+  const stopwords = new Set([
+    "in", "that", "with", "for", "to", "and", "of", "on", "using", "via",
+    "which", "from", "into", "where", "when", "app", "application", "as",
+  ]);
+  const words: string[] = [];
+  for (const w of trimmed.split(/\s+/).filter(Boolean)) {
+    if (stopwords.has(w)) break;
+    words.push(w);
+    if (words.length >= 3) break;
+  }
+  if (words.length === 0) return "New Project";
+  const acronyms = new Set(["cli", "ai", "api", "sdk", "saas", "ui", "ux", "ios", "ml", "crm", "cms", "erp", "hrm"]);
+  const name = words
+    .map((w) =>
+      acronyms.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)
+    )
+    .join(" ")
+    .replace(/[^a-zA-Z0-9 ]/g, "")
+    .trim();
+  return name || "New Project";
+}
+
+export { stageOrder };
