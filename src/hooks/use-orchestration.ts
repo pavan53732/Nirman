@@ -6,53 +6,124 @@ import { stageDetails } from "@/lib/mock-data";
 import { orchestrator, executionEngine, checkpointManager } from "@/lib/engine";
 import type { StageId } from "@/lib/types";
 
-const STAGE_DURATION_MS: Record<StageId, number> = {
-  analyze: 1400,
-  plan: 1800,
-  architect: 2200,
-  generate: 2600,
-  build: 2000,
-  test: 1800,
-  package: 1600,
-  ready: 400,
-};
-
 /**
- * Drives the autonomous pipeline. The Execution Engine runs the task DAG in
- * parallel (dependency-scheduled, with quality gates + self-healing). This
- * hook subscribes to engine events and mirrors stage progression into the
- * UI store, so the minimal status panel reflects the engine's real state.
+ * TRUE AUTONOMY LOOP — drives the pipeline UI entirely from execution engine
+ * events. NO setTimeout for stage advancement. Stage status is derived from
+ * the engine's real task states via getStageStatuses().
  *
- * The hook depends only on `isBuilding` + the running stage id (NOT the whole
- * stages array) to avoid an infinite render loop from detail-text updates.
+ * Flow:
+ *   1. orchestrator.startBuild() submits tasks to executionEngine
+ *   2. executionEngine runs tasks (real tools / gates / self-healing)
+ *   3. executionEngine emits task-succeeded / task-failed / gate-evaluated events
+ *   4. This hook listens, calls executionEngine.getStageStatuses() + getProgress()
+ *   5. Updates the UI store stages + progress from real engine state
+ *   6. When all tasks done → set isBuilding=false, artifacts ready, preview ready
+ *
+ * Zero manual clicks. Zero timers. Engine events drive everything.
  */
 export function useOrchestration() {
   const isBuilding = useApp((s) => s.isBuilding);
-  const stages = useApp((s) => s.stages);
-  const runningStageId = stages.find((s) => s.status === "running")?.id ?? null;
-
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const detailTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const syncedRef = useRef(false);
 
-  // Subscribe to execution-engine events → forward to logs (observability).
+  // Subscribe to execution-engine events → drive UI + logs.
   useEffect(() => {
+    const levelMap: Record<string, "debug" | "info" | "warn" | "error" | "success"> = {
+      debug: "debug",
+      info: "info",
+      warn: "warn",
+      error: "error",
+      success: "success",
+    };
+
+    const syncStagesFromEngine = () => {
+      const statuses = executionEngine.getStageStatuses();
+      const progress = executionEngine.getProgress();
+      const stages = useApp.getState().stages;
+
+      // Update each stage's status from the engine's real task states
+      let changed = false;
+      const updatedStages = stages.map((st) => {
+        const engineStatus = statuses[st.id];
+        const newStatus =
+          engineStatus === "done" ? "done" as const :
+          engineStatus === "running" ? "running" as const :
+          engineStatus === "failed" ? "failed" as const :
+          "pending" as const;
+        if (st.status !== newStatus) {
+          changed = true;
+          return { ...st, status: newStatus };
+        }
+        return st;
+      });
+
+      if (changed) {
+        useApp.setState({ stages: updatedStages });
+      }
+
+      // Find the running stage and set rotating detail text
+      const runningStage = updatedStages.find((s) => s.status === "running");
+      if (runningStage) {
+        const details = stageDetails[runningStage.id as StageId] ?? [];
+        if (details.length > 0 && !runningStage.detail) {
+          useApp.getState().setStage(runningStage.id, { detail: details[0] });
+        }
+      }
+
+      // Check if the engine is idle (all tasks done) → finalize
+      if (executionEngine.isIdle() && useApp.getState().isBuilding) {
+        const allDone = Object.values(statuses).every((s) => s === "done" || s === "pending");
+        const anyFailed = Object.values(statuses).some((s) => s === "failed");
+        if (allDone && !anyFailed) {
+          // All stages complete — finalize
+          useApp.getState().setArtifactsReady(true);
+          useApp.getState().setPreviewReady(true);
+          useApp.getState().setHotReloading(false);
+          useApp.getState().addLog("success", "orchestrator", "All stages complete. Deliverables ready.");
+
+          // Save a final checkpoint
+          const snapshot: Record<string, string> = {};
+          updatedStages.forEach((s) => {
+            snapshot[s.id] = s.status;
+          });
+          const wfId = useApp.getState().currentWorkflowId ?? "new-project";
+          checkpointManager.save("ready", wfId as never, snapshot, 0);
+          useApp.getState().setLastCheckpointStage("ready");
+          useApp.setState({ isBuilding: false });
+        }
+      }
+    };
+
     const unsub = orchestrator.subscribe((e) => {
-      const levelMap: Record<string, "debug" | "info" | "warn" | "error" | "success"> = {
-        debug: "debug",
-        info: "info",
-        warn: "warn",
-        error: "error",
-        success: "success",
-      };
-      if (e.type === "gate-evaluated" || e.type === "task-retried" || e.type === "checkpoint-saved" || e.type === "artifact-produced") {
-        useApp.getState().addLog(levelMap[e.level], e.type, e.message);
+      // Forward engine events to logs
+      if (e.type === "gate-evaluated" || e.type === "task-retried" || e.type === "checkpoint-saved" || e.type === "artifact-produced" || e.type === "task-queued") {
+        useApp.getState().addLog(levelMap[e.level] ?? "info", e.type, e.message);
+      }
+
+      // On task-succeeded or task-failed → re-sync stages from engine state
+      if (e.type === "task-succeeded" || e.type === "task-failed" || e.type === "gate-evaluated") {
+        syncStagesFromEngine();
+      }
+
+      // On artifact-produced during generate → trigger hot reload + preview
+      if (e.type === "artifact-produced" && e.stageId === "generate") {
+        useApp.getState().setHotReloading(true);
+        setTimeout(() => {
+          useApp.getState().setPreviewReady(true);
+          useApp.getState().setHotReloading(false);
+        }, 800);
+      }
+
+      // Log task completion with stage info
+      if (e.type === "task-succeeded" && e.stageId) {
+        useApp.getState().addLog("success", e.stageId, e.message);
       }
     });
+
     return unsub;
   }, []);
 
   // On mount, check IndexedDB for a persisted checkpoint (crash recovery).
-  // If found and we're not already building, surface a resume hint in the logs.
   useEffect(() => {
     if (typeof window === "undefined") return;
     checkpointManager.hasPersistedState().then((has) => {
@@ -62,67 +133,85 @@ export function useOrchestration() {
     });
   }, []);
 
+  // When isBuilding becomes true, do an initial sync + set up a polling
+  // fallback that syncs UI state from the engine every 2 seconds. This is NOT
+  // a stage-advancement timer — it only reads the engine's real state and
+  // mirrors it to the UI. It catches cases where events fire before the
+  // listener is set up (timing issue with async orchestrator.startBuild).
   useEffect(() => {
-    if (!isBuilding || !runningStageId) return;
-
-    const duration = STAGE_DURATION_MS[runningStageId] ?? 1500;
-    const details = stageDetails[runningStageId] ?? [];
-
-    // Rotating detail lines for the running stage (does NOT change runningStageId,
-    // so this effect is not re-triggered by it).
-    if (details.length > 0) {
-      useApp.getState().setStage(runningStageId, { detail: details[0] });
-      let detailIdx = 0;
-      detailTimerRef.current = setInterval(() => {
-        detailIdx = (detailIdx + 1) % details.length;
-        useApp.getState().setStage(runningStageId, { detail: details[detailIdx] });
-      }, Math.max(600, duration / (details.length + 1)));
+    if (!isBuilding) {
+      syncedRef.current = false;
+      return;
     }
 
-    // Trigger hot-reload + preview readiness mid-way through "generate".
-    let previewOn: ReturnType<typeof setTimeout> | null = null;
-    let hotOff: ReturnType<typeof setTimeout> | null = null;
-    if (runningStageId === "generate") {
-      useApp.getState().setHotReloading(true);
-      previewOn = setTimeout(() => useApp.getState().setPreviewReady(true), Math.floor(duration * 0.6));
-      hotOff = setTimeout(() => useApp.getState().setHotReloading(false), duration + 500);
-    }
-
-    timerRef.current = setTimeout(() => {
-      useApp.getState().addLog("success", runningStageId, `${labelFor(runningStageId)} complete`);
-      // Save a checkpoint after each stage (Recovery & Checkpointing)
-      const snapshot: Record<string, import("@/lib/engine/types").TaskStatus> = {};
-      useApp.getState().stages.forEach((s) => {
-        snapshot[s.id] = (s.status === "running" ? "succeeded" : s.status) as import("@/lib/engine/types").TaskStatus;
+    // Sync function — reads engine state, updates UI
+    const syncFromEngine = () => {
+      const statuses = executionEngine.getStageStatuses();
+      const stages = useApp.getState().stages;
+      let changed = false;
+      const updated = stages.map((st) => {
+        const es = statuses[st.id];
+        const newStatus = (es === "done" ? "done" : es === "running" ? "running" : es === "failed" ? "failed" : "pending") as "pending" | "running" | "done" | "failed";
+        if (st.status !== newStatus) {
+          changed = true;
+          return { ...st, status: newStatus };
+        }
+        return st;
       });
-      const wfId = useApp.getState().currentWorkflowId ?? "new-project";
-      checkpointManager.save(runningStageId, wfId as never, snapshot, 0);
-      useApp.getState().setLastCheckpointStage(runningStageId);
-      useApp.getState().advanceStage();
-    }, duration);
+      if (changed) useApp.setState({ stages: updated });
+
+      // Check for completion
+      if (executionEngine.isIdle()) {
+        const allDone = Object.values(statuses).every((s) => s === "done" || s === "pending");
+        const anyFailed = Object.values(statuses).some((s) => s === "failed");
+        if (!allDone) {
+          // Debug: log why we're not done
+          const notDone = Object.entries(statuses).filter(([, s]) => s !== "done" && s !== "pending").map(([k, v]) => `${k}=${v}`);
+          if (notDone.length > 0) {
+            useApp.getState().addLog("debug", "orchestrator", `Engine idle but stages not all done: ${notDone.join(", ")}`);
+          }
+        }
+        if (allDone && !anyFailed && useApp.getState().isBuilding) {
+          useApp.getState().setArtifactsReady(true);
+          useApp.getState().setPreviewReady(true);
+          useApp.getState().setHotReloading(false);
+          useApp.getState().addLog("success", "orchestrator", "All stages complete. Deliverables ready.");
+          const snapshot: Record<string, string> = {};
+          updated.forEach((s) => { snapshot[s.id] = s.status; });
+          const wfId = useApp.getState().currentWorkflowId ?? "new-project";
+          checkpointManager.save("ready", wfId as never, snapshot, 0);
+          useApp.getState().setLastCheckpointStage("ready");
+          useApp.setState({ isBuilding: false });
+        }
+      }
+    };
+
+    // Initial sync
+    syncFromEngine();
+
+    // Polling fallback every 2 seconds (UI sync only, not stage advancement)
+    const pollInterval = setInterval(() => {
+      const tasks = executionEngine.allTasks();
+      const running = tasks.filter((t) => t.status === "running").length;
+      const queued = tasks.filter((t) => t.status === "queued" || t.status === "ready").length;
+      const failed = tasks.filter((t) => t.status === "failed").length;
+      const succeeded = tasks.filter((t) => t.status === "succeeded").length;
+      const idle = executionEngine.isIdle();
+      if (running > 0 || queued > 0 || (idle && useApp.getState().isBuilding)) {
+        useApp.getState().addLog("debug", "engine-poll", `tasks: ${tasks.length} total, ${succeeded} done, ${running} running, ${queued} queued, ${failed} failed, idle=${idle}`);
+      }
+      syncFromEngine();
+    }, 2000);
 
     return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-      if (detailTimerRef.current) clearInterval(detailTimerRef.current);
-      if (previewOn) clearTimeout(previewOn);
-      if (hotOff) clearTimeout(hotOff);
+      clearInterval(pollInterval);
+      if (detailTimerRef.current) {
+        clearInterval(detailTimerRef.current);
+        detailTimerRef.current = null;
+      }
     };
-  }, [isBuilding, runningStageId]);
+  }, [isBuilding]);
 }
 
-function labelFor(id: StageId): string {
-  const map: Record<StageId, string> = {
-    analyze: "Understanding",
-    plan: "Planning",
-    architect: "Architecture",
-    generate: "Generating",
-    build: "Building",
-    test: "Testing",
-    package: "Packaging",
-    ready: "Ready",
-  };
-  return map[id];
-}
-
-// Expose execution-engine idle check for the UI.
+// Expose execution-engine for the UI.
 export { executionEngine };

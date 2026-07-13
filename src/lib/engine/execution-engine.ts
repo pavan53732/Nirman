@@ -62,11 +62,16 @@ export class ExecutionEngine {
   }
 
   private trySchedule(): void {
-    if (this.cancelled) return;
+    if (this.cancelled) {
+      this.emit({ type: "task-failed", message: `trySchedule: cancelled=true, skipping`, level: "debug" });
+      return;
+    }
     // Promote queued tasks whose dependencies are satisfied
+    let promoted = 0;
     for (const t of this.tasks.values()) {
       if (t.status === "queued" && this.depsSatisfied(t)) {
         t.status = "ready";
+        promoted++;
       }
     }
     // Start ready tasks up to the parallelism limit
@@ -74,6 +79,9 @@ export class ExecutionEngine {
     for (const t of ready) {
       if (this.running.size >= this.maxParallel) break;
       this.start(t);
+    }
+    if (promoted > 0 || ready.length > 0) {
+      this.emit({ type: "task-queued", message: `trySchedule: promoted ${promoted}, started ${Math.min(ready.length, this.maxParallel - 0)}, running=${this.running.size}`, level: "debug" });
     }
   }
 
@@ -175,7 +183,8 @@ export class ExecutionEngine {
       if (task.gate === "compilation" && ctx.workspacePath && level !== "human-question") {
         const repaired = await this.attemptLLMRepair(ctx.workspacePath);
         if (repaired) {
-          this.emit({ type: "task-retried", taskId: task.id, message: `Applied LLM repair to ${repaired.file}`, level: "info" });
+          // Diff already logged to Build Memory in attemptLLMRepair
+          void repaired.diff;
         }
       }
 
@@ -194,8 +203,10 @@ export class ExecutionEngine {
     };
   }
 
-  /** Attempt to repair compilation errors via the LLM repair API. */
-  private async attemptLLMRepair(workspacePath: string): Promise<{ file: string } | null> {
+  /** Attempt to repair compilation errors via the LLM repair API.
+   *  Reads the failing file, calls /api/repair, writes the patched content
+   *  back to the workspace, and logs the diff to Build Memory. */
+  private async attemptLLMRepair(workspacePath: string): Promise<{ file: string; diff: string } | null> {
     try {
       // Re-run tsc to get fresh errors
       const { invokeToolClient } = await import("./tool-client");
@@ -206,14 +217,14 @@ export class ExecutionEngine {
       const firstError = tscResult.errors[0];
       const fileRes = await fetch(`/api/workspace?path=${encodeURIComponent(workspacePath)}&file=${encodeURIComponent(firstError.file)}`);
       if (!fileRes.ok) return null;
-      const { content } = await fileRes.json();
+      const { content: originalContent } = await fileRes.json();
 
       const repairRes = await fetch("/api/repair", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filePath: firstError.file,
-          fileContent: content,
+          fileContent: originalContent,
           errors: tscResult.errors,
           language: "typescript",
         }),
@@ -229,11 +240,45 @@ export class ExecutionEngine {
       });
       if (!writeRes.ok) return null;
 
+      // Compute a simple diff for observability + Build Memory
+      const origLines = originalContent.split("\n");
+      const newLines = patchedContent.split("\n");
+      const diffParts: string[] = [];
+      const maxLines = Math.max(origLines.length, newLines.length);
+      for (let i = 0; i < maxLines; i++) {
+        if (origLines[i] !== newLines[i]) {
+          if (origLines[i] !== undefined) diffParts.push(`- L${i + 1}: ${origLines[i]}`);
+          if (newLines[i] !== undefined) diffParts.push(`+ L${i + 1}: ${newLines[i]}`);
+        }
+      }
+      const diff = diffParts.join("\n").slice(0, 2000); // cap at 2KB
+
+      // Log the diff to Build Memory via projectMemory
+      const { projectMemory } = await import("./memories");
+      projectMemory.write(
+        "build",
+        `Repair diff: ${firstError.file}`,
+        JSON.stringify({
+          file: firstError.file,
+          errors: tscResult.errors.slice(0, 5).map((e) => ({ line: e.line, message: e.message })),
+          diff,
+          repairedAt: new Date().toISOString(),
+        }, null, 2),
+        "debugger"
+      );
+
+      // Emit an event for the UI/logs
+      this.emit({
+        type: "task-retried",
+        message: `Self-heal: patched ${firstError.file} (${diffParts.length} lines changed)`,
+        level: "info",
+      });
+
       // Charge real tokens from the repair LLM call
       const { observability } = await import("./observability");
       observability.chargeTokens("debugger" as AgentRole, tokensUsed ?? 0, "new-project");
 
-      return { file: firstError.file };
+      return { file: firstError.file, diff };
     } catch {
       return null;
     }
@@ -278,6 +323,35 @@ export class ExecutionEngine {
   }
   isIdle(): boolean {
     return this.running.size === 0 && ![...this.tasks.values()].some((t) => t.status === "ready" || t.status === "queued");
+  }
+
+  /**
+   * Compute progress as { completed, total, percent } from real task states.
+   * Used by the UI to drive the progress bar — no timers, no fake counts.
+   */
+  getProgress(): { completed: number; total: number; percent: number } {
+    const all = this.allTasks();
+    const total = all.length;
+    const completed = all.filter((t) => t.status === "succeeded" || t.status === "skipped").length;
+    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+    return { completed, total, percent };
+  }
+
+  /**
+   * Derive the UI stage status for all 8 pipeline stages from real task states.
+   * Returns a map stageId → "pending" | "running" | "done" | "failed".
+   */
+  getStageStatuses(): Record<string, "pending" | "running" | "done" | "failed"> {
+    const out: Record<string, "pending" | "running" | "done" | "failed"> = {};
+    const stageIds = ["analyze", "plan", "architect", "generate", "build", "test", "package", "ready"];
+    for (const sid of stageIds) {
+      const s = this.stageStatus(sid);
+      if (s === "done") out[sid] = "done";
+      else if (s === "running") out[sid] = "running";
+      else if (s === "failed") out[sid] = "failed";
+      else out[sid] = "pending";
+    }
+    return out;
   }
 }
 
@@ -412,7 +486,7 @@ export function makeTask(opts: {
     description: opts.description,
     agent: opts.agent,
     toolId: opts.toolId,
-    dependsOn: opts.dependsOn ?? [],
+    dependsOn: opts.dependsOn ? [...opts.dependsOn] : [],
     status: "queued",
     // durationMs is measured at runtime from real tool execution (startedAt→finishedAt).
     // No fake random duration — default 0 until the task actually runs.

@@ -54,15 +54,13 @@ export class WorkflowEngine {
 
     for (const stage of workflow.stages) {
       const stageId = stage.id as StageId;
-      // Only include stages the UI surface expects (map workflow stages to the
-      // 8-stage pipeline where applicable; unknown stages still run).
       const stageTask = makeTask({
         workflowId: workflow.id,
         stageId,
         title: stage.label,
         description: stage.description,
         agent: stage.agents[0] ?? ("orchestrator" as AgentRole),
-        dependsOn: prevStageTaskIds,
+        dependsOn: [...prevStageTaskIds], // copy to avoid shared-reference bug
       });
       tasks.push(stageTask);
       const stageTaskIds = [stageTask.id];
@@ -75,7 +73,7 @@ export class WorkflowEngine {
           title: `Gate: ${gate}`,
           description: `Evaluate ${gate} gate`,
           agent: "orchestrator" as AgentRole,
-          dependsOn: stageTaskIds,
+          dependsOn: [...stageTaskIds], // copy — NOT the same array reference
           gate: gate as GateId,
         });
         tasks.push(gateTask);

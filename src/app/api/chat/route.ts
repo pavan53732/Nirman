@@ -97,6 +97,7 @@ export async function POST(req: NextRequest) {
           /* controller may already be closed */
         }
       };
+      let totalTokens = 0;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -125,11 +126,21 @@ export async function POST(req: NextRequest) {
                     encoder.encode(`data: ${JSON.stringify({ content: delta })}\n\n`)
                   );
                 }
+                // Capture real token usage from the upstream response
+                if (json?.usage?.total_tokens) {
+                  totalTokens = json.usage.total_tokens;
+                }
               } catch {
                 // ignore non-JSON keepalive lines
               }
             }
           }
+        }
+        // Emit real token usage as a final event before [DONE]
+        if (totalTokens > 0) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ usage: { total_tokens: totalTokens } })}\n\n`)
+          );
         }
         // upstream ended without an explicit [DONE] — emit our own terminator
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));

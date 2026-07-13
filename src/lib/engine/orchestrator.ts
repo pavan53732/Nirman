@@ -252,11 +252,14 @@ export class Orchestrator {
     const primaryTarget = targets[0];
     const primaryType = primaryTarget?.kind === "windows" ? "desktop" : primaryTarget?.kind === "android" ? "android" : "web";
     for (const task of tasks) {
-      if (task.gate === "compilation" && webWorkspace) {
+      // Set gateContext for ALL gate tasks. Structural gates (architecture,
+      // security, etc.) need artifactCount to pass. Compilation gates need
+      // workspacePath + targetType.
+      if (task.gate) {
         (task as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext = {
           workspacePath: webWorkspace,
           artifactCount: totalFiles,
-          targetType: primaryType,
+          targetType: task.gate === "compilation" ? primaryType : undefined,
         };
       }
       // Attach toolId + cwd to the build stage task so it runs npm-build (web only)

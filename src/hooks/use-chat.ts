@@ -66,6 +66,7 @@ export function useChat() {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let realTokens = 0;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -84,10 +85,22 @@ export function useChat() {
                 got = true;
                 appendToMessage(assistantId, json.content);
               }
+              // Capture real token usage from the provider
+              if (json.usage?.total_tokens) {
+                realTokens = json.usage.total_tokens;
+              }
             } catch {
               /* ignore */
             }
           }
+        }
+
+        // Charge real tokens to observability + cost optimizer
+        if (realTokens > 0) {
+          const { observability, tokenBudgetManager } = await import("@/lib/engine");
+          observability.chargeTokens("planner", realTokens, "new-project");
+          tokenBudgetManager.charge("planner", "new-project", realTokens);
+          addLog("info", "provider", `Chat used ${realTokens} tokens (real usage from provider)`);
         }
 
         if (!got) {
