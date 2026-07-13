@@ -240,3 +240,19 @@ Work Log:
 
 Stage Summary:
 - VERIFIED: Dialog opens with 6 provider cards (Z.AI, OpenAI, Anthropic, Ollama, Groq, OpenRouter). Each card has API Format select, API Key with eye toggle, Base URL, Model Name dropdown, status dot, Test button. Z.AI auto-tested on open → "Invalid API Key — 401 Unauthorized" (real response from Z.AI API). /api/ai/test-connection tested directly: OpenAI format → 401 (real Z.AI response), Anthropic format → 403 (real Anthropic response), invalid model → 401. All 5 tabs verified (Providers, Autonomy, Self-Healing, Cost, Execution). Mobile responsive (358px dialog on 390px viewport). Lint clean, server 200, 4 chips, Export button, Run disabled, no Publish, no console errors.
+
+---
+Task ID: 14
+Agent: Z.ai Code (main)
+Task: Fix UI to match true autonomous chat-first flow — remove mock data, no Publish, chat drives autonomy.
+
+Work Log:
+- (1) Removed all seed projects: deleted seedProjects array (Invoicer Desktop, Pulse Analytics, TrailMate) from mock-data.ts. Store initial state: projects=[], activeProjectId="", artifacts=[]. Fresh load shows "No project" in header dropdown, empty state "Describe your app idea" with placeholder "e.g. Build offline invoicing Windows app with Android companion". No mock projects anywhere.
+- (2) Removed Publish button + fake artifacts: makeArtifacts() no longer generates hardcoded 84.2MB exe/msix/apk sizes. Artifacts are real source bundles per target (desktop-source.zip, android-source.zip, web-admin-source.zip) + DecisionLog.json, with sizeLabel="—" (set from real file count after generation). Run button disabled with tooltip. No Publish button in UI.
+- (3) Rewrote chat-panel.tsx submit(): Step 1 — detectAmbiguity(prompt). If score > 0.75: add assistant message "I need a bit more detail..." with the specific checks that matched + question, do NOT start build, return. If score <= 0.75: Step 2 — detectTargets(prompt), format decision rationale cards ("Windows: WinUI 3 + .NET 8 because offline-sync detected, confidence 92%"), add assistant message "Got it. Understanding your vision... Auto-selecting stack via Decision Engine... Starting autonomous build now". Step 3 — call startBuild(prompt) automatically (no extra click), then stream LLM response via send(). Fixed use-chat.ts to NOT duplicate user message (chat panel handles it now).
+- (4) Fixed header dropdown: shows "No project" when empty, lists only real projects with real target badges (windows/android/web from project.targets), "+ Start a new build" clears chat and focuses input.
+- (5) Fixed empty state placeholder: "Describe your app idea" + "e.g. Build offline invoicing Windows app with Android companion".
+- Fixed desktop-generator.ts bug: `appName.ToLower()` (C# syntax in TS template) → `appName.toLowerCase()`. This was causing startBuild to crash with "TypeError: appName.ToLower is not a function".
+
+Stage Summary:
+- VERIFIED: Fresh reload → "No project", no Invoicer/Pulse/TrailMate, empty state with correct placeholder, 4 chips, no Publish button. "Build app" → ambiguity score 0.80 → asks clarification in chat, status Idle, 0 files. "Build offline invoicing Windows app with billing and stock" → score 0.30 → decision rationale shown in chat ("App → Tauri + Rust (85%)") → auto-starts build → status Ready 100% → 13 files generated → header shows "Offline Invoicing Windows" (derived from prompt). Lint clean, server 200, mobile responsive at 390px, no console errors.

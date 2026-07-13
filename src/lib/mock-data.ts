@@ -53,50 +53,8 @@ export const defaultSettings: AISettings = {
   offlineFirst: true,
 };
 
-/* ---------------- Multi-target seed projects ---------------- */
-
-const invoicerTargets: TargetSpec[] = [
-  { id: "t1", kind: "windows", label: "Desktop App", role: "Primary invoicing workspace", stack: "WinUI 3 + .NET 8" },
-];
-const pulseTargets: TargetSpec[] = [
-  { id: "t1", kind: "web", label: "Web App", role: "Analytics dashboard & ingestion API", stack: "Next.js + Node.js" },
-];
-const trailmateTargets: TargetSpec[] = [
-  { id: "t1", kind: "android", label: "Android App", role: "On-device hiking companion", stack: "Flutter + Kotlin modules" },
-];
-
-export const seedProjects: ProjectMeta[] = [
-  {
-    id: "proj-invoicer",
-    name: "Invoicer Desktop",
-    kind: "windows",
-    stack: "WinUI 3 + .NET 8",
-    description: "Offline-first Windows invoicing app with PDF export & recurring invoices.",
-    createdAt: "2025-01-12T09:14:00Z",
-    prompt: "A Windows desktop invoicing app for small businesses. Offline-first, local encrypted storage, PDF export, multi-currency, recurring invoices, dashboard with charts.",
-    targets: invoicerTargets,
-  },
-  {
-    id: "proj-pulse",
-    name: "Pulse Analytics",
-    kind: "web",
-    stack: "Next.js + Node.js",
-    description: "Real-time web analytics dashboard with event ingestion and cohorts.",
-    createdAt: "2025-01-03T11:00:00Z",
-    prompt: "A real-time web analytics SaaS with an event ingestion API, live dashboards, funnels, retention cohorts, team management, and Stripe billing.",
-    targets: pulseTargets,
-  },
-  {
-    id: "proj-trailmate",
-    name: "TrailMate",
-    kind: "android",
-    stack: "Flutter + Kotlin modules",
-    description: "Hiking companion with offline maps and on-device AI trail recommendations.",
-    createdAt: "2024-12-20T08:30:00Z",
-    prompt: "An Android hiking app with offline topo maps, GPS trail recording, elevation profiles, community trails, and on-device AI recommendations.",
-    targets: trailmateTargets,
-  },
-];
+/* ---------------- No seed projects — projects start empty ---------------- */
+export const seedProjects: ProjectMeta[] = [];
 
 export const seedChat: ChatMessage[] = [
   {
@@ -376,25 +334,25 @@ agents.forEach((a) => {
 });
 
 export function makeArtifacts(projectName: string, _kind: string, targets: TargetSpec[]): Artifact[] {
+  // Real artifacts — source bundles per target + shared docs. Sizes are
+  // determined at runtime from actual generated file counts, not hardcoded.
   const arts: Artifact[] = [];
+  const slug = projectName.replace(/[^a-zA-Z0-9]/g, "");
   for (const t of targets) {
-    const slug = projectName.replace(/[^a-zA-Z0-9]/g, "");
-    if (t.kind === "windows") {
-      arts.push({ id: `a-${t.id}-exe`, name: `${slug}-Setup.exe`, kind: "installer", platform: "Windows", targetId: t.id, sizeLabel: "84.2 MB", ready: false, url: "#" });
-      arts.push({ id: `a-${t.id}-msix`, name: `${slug}.msix`, kind: "installer", platform: "Windows", targetId: t.id, sizeLabel: "79.5 MB", ready: false, url: "#" });
-    } else if (t.kind === "android") {
-      arts.push({ id: `a-${t.id}-apk`, name: `${slug}.apk`, kind: "installer", platform: "Android", targetId: t.id, sizeLabel: "42.1 MB", ready: false, url: "#" });
-      arts.push({ id: `a-${t.id}-aab`, name: `${slug}.aab`, kind: "package", platform: "Android", targetId: t.id, sizeLabel: "38.7 MB", ready: false, url: "#" });
-    } else if (t.kind === "web") {
-      arts.push({ id: `a-${t.id}-web`, name: `${slug}-web.zip`, kind: "package", platform: "Web", targetId: t.id, sizeLabel: "8.4 MB", ready: false, url: "#" });
-    } else if (t.kind === "cli") {
-      arts.push({ id: `a-${t.id}-bin`, name: `${slug}-${t.kind}`, kind: "app", platform: "Cross-platform", targetId: t.id, sizeLabel: "6.2 MB", ready: false, url: "#" });
-    } else {
-      arts.push({ id: `a-${t.id}-pkg`, name: `${slug}-${t.kind}.zip`, kind: "package", platform: "All", targetId: t.id, sizeLabel: "5.0 MB", ready: false, url: "#" });
-    }
+    const folder = t.kind === "windows" ? "desktop" : t.kind === "android" ? "android" : t.kind === "web" ? "web-admin" : t.kind;
+    arts.push({
+      id: `a-${t.id}-src`,
+      name: `${folder}-source.zip`,
+      kind: "source",
+      platform: t.kind === "windows" ? "Windows" : t.kind === "android" ? "Android" : "Web",
+      targetId: t.id,
+      sizeLabel: "—", // set from real file count after generation
+      ready: false,
+      url: "#",
+    });
   }
-  // shared artifacts
-  arts.push({ id: "a-src", name: `${projectName.replace(/[^a-zA-Z0-9]/g, "")}-source.zip`, kind: "source", platform: "All", sizeLabel: "12.4 MB", ready: false, url: "#" });
-  arts.push({ id: "a-docs", name: `architecture.pdf`, kind: "docs", platform: "All", sizeLabel: "1.1 MB", ready: false, url: "#" });
+  // Shared artifacts
+  arts.push({ id: "a-src", name: `${slug}-source.zip`, kind: "source", platform: "All", sizeLabel: "—", ready: false, url: "#" });
+  arts.push({ id: "a-decisionlog", name: `DecisionLog.json`, kind: "docs", platform: "All", sizeLabel: "—", ready: false, url: "#" });
   return arts;
 }

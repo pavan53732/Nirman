@@ -87,15 +87,15 @@ function primaryPreviewTarget(targets: TargetSpec[]): PreviewTarget {
 }
 
 export const useApp = create<AppState>((set, get) => ({
-  projects: seedProjects,
-  activeProjectId: seedProjects[0].id,
+  projects: [], // No seed projects — starts empty, populated by real builds
+  activeProjectId: "",
   chat: seedChat,
   stages: initialStages.map((s) => ({ ...s })),
-  artifacts: makeArtifacts(seedProjects[0].name, seedProjects[0].kind, seedProjects[0].targets),
+  artifacts: [], // No fake artifacts — populated by real generation
   logs: seedLogs,
   providers: seedProviders,
   settings: defaultSettings,
-  previewTarget: primaryPreviewTarget(seedProjects[0].targets),
+  previewTarget: "windows",
   previewReady: false,
   hotReloading: false,
 

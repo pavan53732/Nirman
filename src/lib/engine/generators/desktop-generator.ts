@@ -81,19 +81,19 @@ MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "${appName}", "src\\${appName}\\${appName}.csproj", "{${guid(1)}}"
 EndProject
 Global
-	GlobalSection(SolutionConfigurationPlatforms) = preSolution
-		Debug|x64 = Debug|x64
-		Release|x64 = Release|x64
-	EndGlobalSection
-	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{${guid(1)}}.Debug|x64.ActiveCfg = Debug|x64
-		{${guid(1)}}.Debug|x64.Build.0 = Debug|x64
-		{${guid(1)}}.Release|x64.ActiveCfg = Release|x64
-		{${guid(1)}}.Release|x64.Build.0 = Release|x64
-	EndGlobalSection
-	GlobalSection(SolutionProperties) = preSolution
-		HideSolutionNode = FALSE
-	EndGlobalSection
+        GlobalSection(SolutionConfigurationPlatforms) = preSolution
+                Debug|x64 = Debug|x64
+                Release|x64 = Release|x64
+        EndGlobalSection
+        GlobalSection(ProjectConfigurationPlatforms) = postSolution
+                {${guid(1)}}.Debug|x64.ActiveCfg = Debug|x64
+                {${guid(1)}}.Debug|x64.Build.0 = Debug|x64
+                {${guid(1)}}.Release|x64.ActiveCfg = Release|x64
+                {${guid(1)}}.Release|x64.Build.0 = Release|x64
+        EndGlobalSection
+        GlobalSection(SolutionProperties) = preSolution
+                HideSolutionNode = FALSE
+        EndGlobalSection
 EndGlobal
 `,
   });
@@ -245,7 +245,7 @@ namespace ${appName}.Data;
 
 /// <summary>
 /// EF Core DbContext for local SQLite persistence (offline-first).
-/// Connection string: "Data Source=${appName.ToLower()}.db".
+/// Connection string: "Data Source=${appName.toLowerCase()}.db".
 /// </summary>
 public class AppDbContext : DbContext
 {

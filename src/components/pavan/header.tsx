@@ -43,7 +43,7 @@ export function Header() {
   const setExportOpen = useApp((s) => s.setExportOpen);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
 
-  const active = projects.find((p) => p.id === activeProjectId) ?? projects[0];
+  const active = projects.length > 0 ? (projects.find((p) => p.id === activeProjectId) ?? projects[0]) : undefined;
   const activeProvider = providers.find((p) => p.id === settings.providerId);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
 
@@ -65,7 +65,9 @@ export function Header() {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="sm" className="gap-2 px-2 font-medium">
-              <span className="truncate max-w-[160px] sm:max-w-[240px]">{active?.name}</span>
+              <span className="truncate max-w-[160px] sm:max-w-[240px]">
+                {active?.name ?? "No project"}
+              </span>
               <ChevronDown className="h-4 w-4 opacity-60" />
             </Button>
           </DropdownMenuTrigger>
@@ -73,6 +75,11 @@ export function Header() {
             <DropdownMenuLabel className="text-xs text-muted-foreground">
               Projects
             </DropdownMenuLabel>
+            {projects.length === 0 && (
+              <div className="px-2 py-3 text-xs text-muted-foreground italic">
+                No projects yet. Describe your app idea in the chat to begin.
+              </div>
+            )}
             {projects.map((p) => (
               <DropdownMenuItem
                 key={p.id}
@@ -81,9 +88,13 @@ export function Header() {
               >
                 <div className="flex w-full items-center justify-between gap-2">
                   <span className="font-medium">{p.name}</span>
-                  <Badge variant="secondary" className="text-[10px] capitalize">
-                    {kindLabel[p.kind] ?? p.kind}
-                  </Badge>
+                  <div className="flex gap-1">
+                    {p.targets.map((t) => (
+                      <Badge key={t.id} variant="secondary" className="text-[9px]">
+                        {t.kind}
+                      </Badge>
+                    ))}
+                  </div>
                 </div>
                 <span className="text-[11px] text-muted-foreground">{p.stack}</span>
               </DropdownMenuItem>
@@ -91,6 +102,7 @@ export function Header() {
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={() => {
+                useApp.getState().clearChat();
                 document.getElementById("chat-input")?.focus();
               }}
               className="gap-2 text-muted-foreground"
@@ -100,9 +112,11 @@ export function Header() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <Badge variant="outline" className="hidden md:inline-flex text-[11px] font-normal">
-          {active?.stack}
-        </Badge>
+        {active && (
+          <Badge variant="outline" className="hidden md:inline-flex text-[11px] font-normal">
+            {active.stack}
+          </Badge>
+        )}
         {active && active.targets.length > 1 && (
           <Badge
             variant="secondary"

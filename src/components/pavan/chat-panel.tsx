@@ -5,10 +5,11 @@ import { useApp } from "@/lib/store";
 import { useChat } from "@/hooks/use-chat";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Bot, User, Send, Sparkles, Loader2, ArrowUp } from "lucide-react";
+import { Bot, User, Sparkles, Loader2, ArrowUp, CheckCircle2 } from "lucide-react";
 import { starterSuggestions } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
+import { detectAmbiguity, AMBIGUITY_THRESHOLD } from "@/lib/engine";
+import { detectTargets } from "@/lib/engine";
 
 const suggestionIcons: Record<string, string> = {
   monitor: "🖥️",
@@ -17,6 +18,7 @@ const suggestionIcons: Record<string, string> = {
   terminal: "⌘",
   bot: "🤖",
   megaphone: "📣",
+  layers: "✨",
 };
 
 export function ChatPanel() {
@@ -27,6 +29,7 @@ export function ChatPanel() {
   const isBuilding = useApp((s) => s.isBuilding);
   const startBuild = useApp((s) => s.startBuild);
   const addLog = useApp((s) => s.addLog);
+  const addMessage = useApp((s) => s.addMessage);
   const { send } = useChat();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -50,9 +53,50 @@ export function ChatPanel() {
     if (!prompt || streaming) return;
     setInput("");
     setHasStarted(true);
-    // kick off the autonomous build pipeline behind the scenes
-    startBuild(prompt);
+
+    // Add user message
+    addMessage({
+      id: `u-${Date.now()}`,
+      role: "user",
+      content: prompt,
+      timestamp: Date.now(),
+    });
     addLog("info", "engine", `Received request: "${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}"`);
+
+    // Step 1: Ambiguity detection
+    const ambiguity = detectAmbiguity(prompt);
+    addLog("info", "ambiguity-detector", `Ambiguity score ${ambiguity.score.toFixed(2)} (threshold ${AMBIGUITY_THRESHOLD})`);
+
+    if (ambiguity.score > AMBIGUITY_THRESHOLD && ambiguity.question) {
+      // Too ambiguous — ask the user, do NOT start build
+      addMessage({
+        id: `a-${Date.now()}`,
+        role: "assistant",
+        content: `I need a bit more detail before I start building.\n\n**Why I'm asking:** ${ambiguity.checks.filter((c) => c.matched).map((c) => c.detail).join("; ")}\n\n${ambiguity.question}\n\nWhat platform are you targeting? What core features do you need? Do you need offline support?`,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    // Step 2: Clear enough — show decision rationale, then auto-start build
+    const targets = detectTargets(prompt);
+    const decisionLines = targets.map((t) => {
+      const decision = t.policies[0];
+      const conf = decision ? ` (${Math.round(decision.confidence * 100)}%)` : "";
+      const rationale = decision ? decision.rationale.split("(")[0].trim() : "";
+      return `**${t.label}** → ${t.stack}${conf}\n  ${rationale}`;
+    }).join("\n\n");
+
+    addMessage({
+      id: `a-${Date.now()}`,
+      role: "assistant",
+      content: `Got it. Understanding your vision for "${prompt}".\n\nAuto-selecting stack via Decision Engine:\n\n${decisionLines}\n\nStarting autonomous build now — I'll handle planning, architecture, code generation, building, testing, and packaging. Watch the status panel for live progress.`,
+      timestamp: Date.now(),
+    });
+
+    // Step 3: Auto-start the build (no extra click needed)
+    startBuild(prompt);
+    // Also stream the LLM response for richer conversation
     await send({ prompt });
   };
 
@@ -79,12 +123,10 @@ export function ChatPanel() {
                 <Sparkles className="h-7 w-7 text-primary" />
               </div>
               <h1 className="text-2xl font-semibold tracking-tight text-balance">
-                Describe what you want to build
+                Describe your app idea
               </h1>
               <p className="mt-2 max-w-md text-sm text-muted-foreground text-balance">
-                Pavan turns natural-language ideas into complete, production-ready apps —
-                Windows, web, Android, CLIs, agents and more. You describe it; the engine
-                plans, builds, tests, and packages it.
+                e.g. "Build offline invoicing Windows app with Android companion"
               </p>
             </div>
           )}

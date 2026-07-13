@@ -20,17 +20,9 @@ export function useChat() {
     async ({ prompt }: SendOpts) => {
       if (streaming) return;
 
-      // push the user message
-      const userMsg = {
-        id: `u-${Date.now()}`,
-        role: "user" as const,
-        content: prompt,
-        timestamp: Date.now(),
-      };
-      addMessage(userMsg);
-
-      // placeholder assistant message that we stream into
-      const assistantId = `a-${Date.now()}`;
+      // The chat panel already added the user message + decision-rationale.
+      // We just create a streaming assistant placeholder for the LLM response.
+      const assistantId = `a-llm-${Date.now()}`;
       addMessage({
         id: assistantId,
         role: "assistant",
@@ -40,8 +32,8 @@ export function useChat() {
       });
       setStreaming(true);
 
-      // build the conversation history for the model (exclude the empty placeholder)
-      const history = [...chat, userMsg]
+      // build the conversation history for the model
+      const history = [...chat, { id: `u-${Date.now()}`, role: "user" as const, content: prompt, timestamp: Date.now() }]
         .filter((m) => m.role !== "system")
         .map((m) => ({ role: m.role, content: m.content }))
         .slice(-12);
