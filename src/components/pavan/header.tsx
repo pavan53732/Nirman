@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Settings, ChevronDown, Plus, Bot, Sun, Moon, Layers, FolderOutput } from "lucide-react";
+import { AISettingsDialog } from "@/components/pavan/ai-settings-dialog";
 import { Badge } from "@/components/ui/badge";
 
 const kindLabel: Record<string, string> = {
@@ -40,6 +41,7 @@ export function Header() {
   const setLogsOpen = useApp((s) => s.setLogsOpen);
   const setCapabilitiesOpen = useApp((s) => s.setCapabilitiesOpen);
   const setExportOpen = useApp((s) => s.setExportOpen);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
 
   const active = projects.find((p) => p.id === activeProjectId) ?? projects[0];
   const activeProvider = providers.find((p) => p.id === settings.providerId);
@@ -157,12 +159,13 @@ export function Header() {
           variant="outline"
           size="sm"
           className="gap-2"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => setAiSettingsOpen(true)}
         >
           <Settings className="h-4 w-4" />
           <span className="hidden sm:inline">AI Settings</span>
         </Button>
       </div>
+      <AISettingsDialog open={aiSettingsOpen} onOpenChange={setAiSettingsOpen} />
     </header>
   );
 }
