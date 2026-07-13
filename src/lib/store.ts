@@ -167,70 +167,70 @@ export const useApp = create<AppState>((set, get) => ({
       targets,
     };
 
-    // Run the orchestrator (submits DAG to execution engine)
-    const result = orchestrator.startBuild(prompt);
+    // Run the orchestrator (async: submits DAG to execution engine after
+    // materializing generated files to the on-disk workspace).
+    void (async () => {
+      const result = await orchestrator.startBuild(prompt);
 
-    // Autonomy gate: if the ambiguity detector raised a question (score >
-    // 0.75), surface it in chat and do NOT start the pipeline. The engine
-    // waits for clarification rather than inventing requirements.
-    if (result.pendingQuestion) {
+      // Autonomy gate: if ambiguous, surface the question and don't start.
+      if (result.pendingQuestion) {
+        set((s) => ({
+          projects: [project, ...s.projects],
+          activeProjectId: project.id,
+          artifacts: makeArtifacts(name, primaryKind, targets),
+          previewReady: false,
+          isBuilding: false,
+          previewTarget: primaryPreviewTarget(targets),
+          currentWorkflowId: result.workflow.id,
+        }));
+        get().addLog("info", "orchestrator", `New project: ${name} · ${targetSummary}`);
+        get().addLog("warn", "ambiguity-detector", `Ambiguity score ${result.ambiguityScore.toFixed(2)} > 0.75 — asking user before proceeding.`);
+        get().addMessage({
+          id: `sys-q-${Date.now()}`,
+          role: "system",
+          content: `Clarification needed: ${result.pendingQuestion}`,
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
       set((s) => ({
         projects: [project, ...s.projects],
         activeProjectId: project.id,
         artifacts: makeArtifacts(name, primaryKind, targets),
         previewReady: false,
-        isBuilding: false,
+        isBuilding: true,
         previewTarget: primaryPreviewTarget(targets),
         currentWorkflowId: result.workflow.id,
       }));
-      get().addLog("info", "orchestrator", `New project: ${name} · ${targetSummary}`);
-      get().addLog("warn", "ambiguity-detector", `Ambiguity score ${result.ambiguityScore.toFixed(2)} > 0.75 — asking user before proceeding.`);
-      // Surface the question as a system message in chat
-      get().addMessage({
-        id: `sys-q-${Date.now()}`,
-        role: "system",
-        content: `Clarification needed: ${result.pendingQuestion}`,
-        timestamp: Date.now(),
+      set({
+        stages: initialStages.map((st, i) => ({
+          ...st,
+          status: i === 0 ? "running" : "pending",
+          detail: undefined,
+          durationMs: undefined,
+        })),
       });
-      return;
-    }
-
-    set((s) => ({
-      projects: [project, ...s.projects],
-      activeProjectId: project.id,
-      artifacts: makeArtifacts(name, primaryKind, targets),
-      previewReady: false,
-      isBuilding: true,
-      previewTarget: primaryPreviewTarget(targets),
-      currentWorkflowId: result.workflow.id,
-    }));
-    set({
-      stages: initialStages.map((st, i) => ({
-        ...st,
-        status: i === 0 ? "running" : "pending",
-        detail: undefined,
-        durationMs: undefined,
-      })),
-    });
-    get().addLog("info", "orchestrator", `New project: ${name} · ${targetSummary}`);
-    get().addLog("info", "workflow-engine", `Workflow: ${result.workflow.name} · ${result.tasks.length} tasks compiled`);
-    get().addLog("info", "ambiguity-detector", `Ambiguity score ${result.ambiguityScore.toFixed(2)} (threshold 0.75) — proceeding autonomously`);
-    if (result.capabilities.length > 0) {
-      get().addLog("info", "decision-engine", `Capabilities detected: ${result.capabilities.join(", ")}`);
-    }
-    const nfs = detectNonFunctionals(prompt);
-    if (nfs.length > 0) {
-      get().addLog("info", "decision-engine", `Non-functionals: ${nfs.join(", ")}`);
-    }
-    targets.forEach((t) =>
-      get().addLog("info", "selector", `Selected ${t.stack} for ${t.label}`)
-    );
-    result.decisions.slice(0, 6).forEach((d) =>
-      get().addLog("info", "decision-engine", `${d.topic} → ${d.chosen} (${Math.round(d.confidence * 100)}%)`)
-    );
-    if (result.generatedFiles > 0) {
-      get().addLog("success", "desktop-generator", `Generated ${result.generatedFiles} source files across ${targets.length} target(s)`);
-    }
+      get().addLog("info", "orchestrator", `New project: ${name} · ${targetSummary}`);
+      get().addLog("info", "workflow-engine", `Workflow: ${result.workflow.name} · ${result.tasks.length} tasks compiled`);
+      get().addLog("info", "ambiguity-detector", `Ambiguity score ${result.ambiguityScore.toFixed(2)} (threshold 0.75) — proceeding autonomously`);
+      if (result.capabilities.length > 0) {
+        get().addLog("info", "decision-engine", `Capabilities detected: ${result.capabilities.join(", ")}`);
+      }
+      const nfs = detectNonFunctionals(prompt);
+      if (nfs.length > 0) {
+        get().addLog("info", "decision-engine", `Non-functionals: ${nfs.join(", ")}`);
+      }
+      targets.forEach((t) =>
+        get().addLog("info", "selector", `Selected ${t.stack} for ${t.label}`)
+      );
+      result.decisions.slice(0, 6).forEach((d) =>
+        get().addLog("info", "decision-engine", `${d.topic} → ${d.chosen} (${Math.round(d.confidence * 100)}%)`)
+      );
+      if (result.generatedFiles > 0) {
+        get().addLog("success", "desktop-generator", `Generated ${result.generatedFiles} source files across ${targets.length} target(s)`);
+      }
+    })();
   },
 
   setStage: (id, patch) =>

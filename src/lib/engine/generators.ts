@@ -9,6 +9,7 @@
 import type { PlatformKind, ArtifactType, AgentRole } from "./types";
 import { artifactRegistry } from "./artifact-registry";
 import { registries } from "./registries";
+import { generateNextjsApp } from "./generators/web-generator";
 
 export interface VirtualFile {
   path: string;
@@ -426,7 +427,7 @@ npm run build
 /* Registry helper — version each file as a source-code artifact       */
 /* ------------------------------------------------------------------ */
 
-function registerFiles(
+export function registerFiles(
   files: VirtualFile[],
   platform: PlatformKind,
   stack: string,
@@ -463,7 +464,8 @@ export function generateForTarget(
   platform: PlatformKind,
   stack: string,
   projectName: string,
-  targetId: string
+  targetId: string,
+  ctx?: { prompt: string; capabilities: import("./types").Capability[]; nonFunctionals: import("./types").NonFunctional[] }
 ): GenerationResult {
   if (platform === "windows") {
     if (/tauri/i.test(stack)) return generateTauri(projectName, targetId);
@@ -473,7 +475,19 @@ export function generateForTarget(
     if (/flutter/i.test(stack)) return generateFlutter(projectName, targetId);
     return generateAndroidCompose(projectName, targetId);
   }
-  if (platform === "web") return generateNextjs(projectName, targetId);
+  if (platform === "web") {
+    // Real generator: produces a compilable Next.js app with Prisma + auth + CRUD
+    if (ctx) {
+      return generateNextjsApp({
+        projectName,
+        targetId,
+        prompt: ctx.prompt,
+        capabilities: ctx.capabilities,
+        nonFunctionals: ctx.nonFunctionals,
+      });
+    }
+    return generateNextjs(projectName, targetId);
+  }
   if (platform === "cli") return generateRustCli(projectName, targetId);
   // Fallback: minimal README
   return registerFiles(

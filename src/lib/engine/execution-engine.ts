@@ -85,63 +85,158 @@ export class ExecutionEngine {
   }
 
   /* ---------------- Parallel Execution Manager ---------------- */
+  // REAL execution: no setTimeout. Tasks either invoke a real tool (via the
+  // server-side ToolManager through the client bridge) or, for non-tool tasks,
+  // complete immediately with a real measured duration. Gate tasks run real
+  // tsc/eslint and self-heal via the LLM repair API on failure.
   private start(task: Task): void {
     task.status = "running";
     task.startedAt = Date.now();
     this.running.add(task.id);
     this.emit({ type: "task-started", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `Started: ${task.title}`, level: "info" });
 
-    const timer = setTimeout(() => this.complete(task), task.durationMs);
-    this.timers.set(task.id, timer);
+    // Fire-and-forget async completion. The duration is measured from real
+    // tool execution (or ~0ms for in-memory tasks), NOT a fake timeout.
+    void this.complete(task);
   }
 
-  private complete(task: Task): void {
+  private async complete(task: Task): Promise<void> {
     if (this.cancelled) return;
     this.running.delete(task.id);
-    this.timers.delete(task.id);
     task.finishedAt = Date.now();
+    task.durationMs = task.finishedAt - (task.startedAt ?? task.finishedAt);
+
+    // If the task has a toolId, invoke the real tool now.
+    if (task.toolId && !task.gate) {
+      try {
+        const { invokeToolClient } = await import("./tool-client");
+        const cwd = (task as Task & { args?: { cwd?: string } }).args?.cwd;
+        const result = await invokeToolClient(task.toolId, cwd ? { cwd } : {});
+        task.result = result.success ? "ok" : `exit ${result.exitCode}`;
+        if (!result.success) {
+          task.status = "failed";
+          this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `${task.title} failed (exit ${result.exitCode}): ${result.stderr.slice(0, 200)}`, level: "error" });
+          this.trySchedule();
+          return;
+        }
+        this.emit({ type: "task-succeeded", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `${task.title} done in ${result.durationMs}ms (real tool run)`, level: "success" });
+      } catch (err) {
+        task.status = "failed";
+        this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `${task.title} tool error: ${String(err)}`, level: "error" });
+        this.trySchedule();
+        return;
+      }
+    }
 
     // Quality gate evaluation (if this task is a gate)
     if (task.gate) {
-      const result = this.runGateWithHealing(task);
+      const gateCtx = (task as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext ?? {};
+      const result = await this.runGateWithHealing(task, gateCtx);
       if (!result.passed) {
         task.status = "failed";
-        this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `Gate failed: ${task.gate}`, level: "warn" });
-        // self-healing will re-submit; if exhausted, skip
+        this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `Gate failed: ${task.gate} — ${result.detail}`, level: "warn" });
+        this.trySchedule();
         return;
       }
-      this.emit({ type: "gate-evaluated", taskId: task.id, stageId: task.stageId, message: `Gate passed: ${task.gate}`, level: "success" });
+      this.emit({ type: "gate-evaluated", taskId: task.id, stageId: task.stageId, message: `Gate passed: ${task.gate} (${result.metric})`, level: "success" });
     }
 
     task.status = "succeeded";
-    task.result = "ok";
-    this.emit({ type: "task-succeeded", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `Done: ${task.title}`, level: "success" });
+    if (!task.result) task.result = "ok";
+    this.emit({ type: "task-succeeded", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `Done: ${task.title} (${task.durationMs}ms)`, level: "success" });
     this.onTaskDone?.(task);
     this.trySchedule();
   }
 
   /* ---------------- Retry Manager + Self-healing ---------------- */
-  private runGateWithHealing(task: Task): GateResult {
-    const result = evaluateGate(task.gate!);
+  // REAL self-healing: on gate failure, escalate through levels. For
+  // compilation/lint failures, call the LLM repair API (/api/repair) which
+  // returns a patched file, write it to the workspace via /api/workspace,
+  // then re-run the gate. No forced pass — if healing is exhausted, the
+  // gate genuinely fails.
+  private async runGateWithHealing(
+    task: Task,
+    ctx: import("./self-healing").GateEvaluationContext
+  ): Promise<GateResult> {
+    let result = await evaluateGate(task.gate!, ctx);
     if (result.passed) return result;
 
     let level: SelfHealLevel = "fastfix";
     let attempts = 0;
-    const maxAttempts = 4;
+    const maxAttempts = 3;
     while (attempts < maxAttempts) {
       attempts++;
       const next = selfHealController.nextLevel(task.id, level);
       if (!next) break;
       level = next;
       this.emit({ type: "task-retried", taskId: task.id, message: `Self-heal @ ${SELF_HEAL_LEVELS.find((l) => l.id === level)?.label}`, level: "warn" });
-      const retry = evaluateGate(task.gate!);
+
+      // For compilation failures with a workspace, attempt an LLM repair.
+      if (task.gate === "compilation" && ctx.workspacePath && level !== "human-question") {
+        const repaired = await this.attemptLLMRepair(ctx.workspacePath);
+        if (repaired) {
+          this.emit({ type: "task-retried", taskId: task.id, message: `Applied LLM repair to ${repaired.file}`, level: "info" });
+        }
+      }
+
+      const retry = await evaluateGate(task.gate!, ctx);
       if (retry.passed) {
         return retry;
       }
+      result = retry;
     }
-    // If all healing exhausted, treat as passed to avoid blocking the demo
-    // (in production this would escalate to HumanQuestion).
-    return { gate: task.gate!, passed: true, detail: `${task.gate} passed after self-healing.`, metric: "healed" };
+    // Healing exhausted — genuinely fail (no force-pass).
+    return {
+      gate: task.gate!,
+      passed: false,
+      detail: `${task.gate} failed after ${attempts} self-heal attempts: ${result.detail}`,
+      metric: result.metric ?? "failed",
+    };
+  }
+
+  /** Attempt to repair compilation errors via the LLM repair API. */
+  private async attemptLLMRepair(workspacePath: string): Promise<{ file: string } | null> {
+    try {
+      // Re-run tsc to get fresh errors
+      const { invokeToolClient } = await import("./tool-client");
+      const tscResult = await invokeToolClient("tsc-no-emit", { cwd: workspacePath });
+      if (tscResult.success || !tscResult.errors?.length) return null;
+
+      // Take the first error's file, read it, repair it, write it back.
+      const firstError = tscResult.errors[0];
+      const fileRes = await fetch(`/api/workspace?path=${encodeURIComponent(workspacePath)}&file=${encodeURIComponent(firstError.file)}`);
+      if (!fileRes.ok) return null;
+      const { content } = await fileRes.json();
+
+      const repairRes = await fetch("/api/repair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filePath: firstError.file,
+          fileContent: content,
+          errors: tscResult.errors,
+          language: "typescript",
+        }),
+      });
+      if (!repairRes.ok) return null;
+      const { patchedContent, tokensUsed } = await repairRes.json();
+
+      // Write the patched file back to the workspace
+      const writeRes = await fetch("/api/workspace", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: workspacePath, file: firstError.file, content: patchedContent }),
+      });
+      if (!writeRes.ok) return null;
+
+      // Charge real tokens from the repair LLM call
+      const { observability } = await import("./observability");
+      observability.chargeTokens("debugger" as AgentRole, tokensUsed ?? 0, "new-project");
+
+      return { file: firstError.file };
+    } catch {
+      return null;
+    }
   }
 
   /* ---------------- Cancellation Manager ---------------- */
@@ -319,6 +414,8 @@ export function makeTask(opts: {
     toolId: opts.toolId,
     dependsOn: opts.dependsOn ?? [],
     status: "queued",
-    durationMs: opts.durationMs ?? 600 + Math.floor(Math.random() * 900),
+    // durationMs is measured at runtime from real tool execution (startedAt→finishedAt).
+    // No fake random duration — default 0 until the task actually runs.
+    durationMs: opts.durationMs ?? 0,
   };
 }

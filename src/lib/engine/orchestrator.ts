@@ -52,16 +52,24 @@ export function detectTargets(prompt: string): DetectedTargets[] {
   const out: DetectedTargets[] = [];
   const wants = (re: RegExp) => re.test(p);
 
+  // Domain inference: if the prompt mentions CAD/3D/GPU/game but no explicit
+  // platform keyword, infer windows/native (not the default web). This prevents
+  // "Build CAD software" from falling through to a generic Next.js app.
+  const isCAD = /\b(cad|autocad|3d modeling|opengl|directx|vulkan|rendering)\b/.test(p);
+  const isGame = /\b(game|unity|godot|2d platformer|3d game)\b/.test(p);
+  const domainInferredWindows = isCAD && !wants(/\b(web|android|cli|api)\b/);
+  const domainInferredGame = isGame && !wants(/\b(web|windows|android|cli|api)\b/);
+
   const multi =
     [
-      wants(/\b(windows|desktop|winui|wpf|winforms|win32)\b/),
+      wants(/\b(windows|desktop|winui|wpf|winforms|win32)\b/) || domainInferredWindows,
       wants(/\b(android|mobile( app)?|kotlin|flutter|companion app|phone app)\b/),
       wants(/\b(web( site| app| admin| portal)?|website|landing|marketing site|saas|portal)\b/),
       wants(/\b(api|rest|backend service|microservice)\b/),
       wants(/\b(cli|command.line|terminal tool)\b/),
     ].filter(Boolean).length > 1;
 
-  if (wants(/\b(windows|desktop|winui|wpf|winforms|win32|\.net\s*(desktop|app))\b/)) {
+  if (wants(/\b(windows|desktop|winui|wpf|winforms|win32|\.net\s*(desktop|app))\b/) || domainInferredWindows) {
     const kind = "windows" as PlatformKind;
     const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
     out.push({ kind, label: multi ? "Desktop App" : "App", role: multi ? "Primary desktop workspace" : "Windows desktop application", stack, capabilities: caps, policies: [decision] });
@@ -92,6 +100,9 @@ export function detectTargets(prompt: string): DetectedTargets[] {
   if (wants(/\b(library|sdk|npm package|crate)\b/)) {
     out.push({ kind: "library" as PlatformKind, label: "Library", role: "Reusable library / SDK", stack: /\b(rust|crate)\b/.test(p) ? "Rust crate" : "TypeScript library", capabilities: caps, policies: [] });
   }
+  if (domainInferredGame) {
+    out.push({ kind: "library" as PlatformKind, label: "Game", role: "Interactive game", stack: "Godot + GDScript", capabilities: caps, policies: [] });
+  }
   if (out.length === 0) {
     const kind = "web" as PlatformKind;
     const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
@@ -115,7 +126,7 @@ export class Orchestrator {
    * requirements/decision memory, compile the workflow DAG, submit to the
    * execution engine, and return the plan.
    */
-  startBuild(prompt: string): OrchestrationResult & { tasks: Task[] } {
+  async startBuild(prompt: string): Promise<OrchestrationResult & { tasks: Task[] }> {
     executionEngine.reset();
     checkpointManager.clear();
     artifactRegistry.clear();
@@ -172,10 +183,16 @@ export class Orchestrator {
     // ---- Real generation: invoke the generator for each detected target ----
     // The Desktop Generator (Anvil) produces WinUI 3 / Tauri scaffolding; the
     // Android Generator (Droid) produces Kotlin+Compose / Flutter; the Web
-    // Generator (Forge) produces Next.js. Files are versioned into the Artifact
-    // Registry and emitted as artifact-produced events for observability.
+    // Generator (Forge) produces a REAL compilable Next.js app (Prisma + auth
+    // + CRUD pages derived from the requirement's data model). Files are
+    // versioned into the Artifact Registry and emitted as artifact-produced
+    // events for observability.
     const generationResults = targets.map((t, i) => {
-      const result = generateForTarget(t.kind, t.stack, promptToName(prompt) || `App${i + 1}`, `t${i + 1}`);
+      const result = generateForTarget(t.kind, t.stack, promptToName(prompt) || `App${i + 1}`, `t${i + 1}`, {
+        prompt,
+        capabilities,
+        nonFunctionals: detectNonFunctionals(prompt),
+      });
       observability.recordEvent({
         id: `ev-${Date.now()}-gen-${i}`,
         ts: Date.now(),
@@ -196,6 +213,53 @@ export class Orchestrator {
 
     // Compile DAG
     const tasks = workflowEngine.compile(workflow, workflow.stages.map((s) => s.id as StageId));
+
+    // Materialize generated files to a real on-disk workspace so the
+    // compilation gate can run `tsc --noEmit` against them. Attach the
+    // workspace path to the compilation gate task + the build stage task.
+    const projectId = `proj-${Date.now()}`;
+    const workspacePaths: Record<string, string> = {}; // targetId -> path
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
+      const gen = generationResults[i];
+      const folder = t.kind === "windows" ? "desktop" : t.kind === "android" ? "android" : t.kind === "web" ? "web-admin" : t.kind === "cli" ? "cli" : "app";
+      try {
+        const res = await fetch("/api/workspace", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId, targetFolder: folder, files: gen.files }),
+        });
+        if (res.ok) {
+          const { path: wsPath } = await res.json();
+          workspacePaths[`t${i + 1}`] = wsPath;
+          observability.recordEvent({
+            id: `ev-${Date.now()}-ws-${i}`,
+            ts: Date.now(),
+            type: "artifact-produced",
+            stageId: "generate",
+            message: `${t.label}: materialized ${gen.files.length} files to ${wsPath}`,
+            level: "info",
+          });
+        }
+      } catch {
+        // workspace write is best-effort; gates will skip if no workspace
+      }
+    }
+    // Annotate compilation gate tasks with the first web workspace path
+    const webWorkspace = workspacePaths["t1"] ?? Object.values(workspacePaths)[0] ?? undefined;
+    for (const task of tasks) {
+      if (task.gate === "compilation" && webWorkspace) {
+        (task as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext = {
+          workspacePath: webWorkspace,
+          artifactCount: totalFiles,
+        };
+      }
+      // Attach toolId + cwd to the build stage task so it runs npm-build
+      if (task.stageId === "build" && !task.gate && webWorkspace) {
+        task.toolId = "npm-build";
+        (task as Task & { args?: { cwd?: string } }).args = { cwd: webWorkspace };
+      }
+    }
 
     // Token budget check
     if (!tokenBudgetManager.withinBudget("planner", workflow.id)) {

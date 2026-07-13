@@ -37,6 +37,7 @@ const KEYWORDS: { cap: Capability; re: RegExp }[] = [
   { cap: "auth", re: /\b(auth|login|sign in|oauth|identity|account)\b/i },
   { cap: "encryption", re: /\b(encrypt|encryption|secure storage|sqlcipher)\b/i },
   { cap: "barcode", re: /\b(barcode|qr|qr code|scanning)\b/i },
+  { cap: "gpu", re: /\b(opengl|directx|direct3d|vulkan|metal|cuda|gpu|3d|rendering|cad|autocad|modeling|shader)\b/i },
 ];
 
 export function detectCapabilities(prompt: string): Capability[] {

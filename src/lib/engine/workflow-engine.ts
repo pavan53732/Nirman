@@ -61,9 +61,8 @@ export class WorkflowEngine {
         stageId,
         title: stage.label,
         description: stage.description,
-        agent: stage.agents[0] ?? "orchestrator" as AgentRole,
+        agent: stage.agents[0] ?? ("orchestrator" as AgentRole),
         dependsOn: prevStageTaskIds,
-        durationMs: 900 + Math.floor(Math.random() * 1400),
       });
       tasks.push(stageTask);
       const stageTaskIds = [stageTask.id];
@@ -77,7 +76,6 @@ export class WorkflowEngine {
           description: `Evaluate ${gate} gate`,
           agent: "orchestrator" as AgentRole,
           dependsOn: stageTaskIds,
-          durationMs: 300 + Math.floor(Math.random() * 400),
           gate: gate as GateId,
         });
         tasks.push(gateTask);
