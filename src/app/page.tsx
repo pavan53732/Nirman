@@ -8,6 +8,7 @@ import { StatusPanel } from "@/components/pavan/status-panel";
 import { ArtifactsPanel } from "@/components/pavan/artifacts-panel";
 import { SettingsDialog } from "@/components/pavan/settings-dialog";
 import { LogsDialog } from "@/components/pavan/logs-dialog";
+import { CapabilitiesDialog } from "@/components/pavan/capabilities-dialog";
 
 export default function Home() {
   useOrchestration();
@@ -44,6 +45,7 @@ export default function Home() {
 
       <SettingsDialog />
       <LogsDialog />
+      <CapabilitiesDialog />
     </div>
   );
 }

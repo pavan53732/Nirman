@@ -11,7 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Settings, ChevronDown, Plus, Bot, Sun, Moon } from "lucide-react";
+import { Settings, ChevronDown, Plus, Bot, Sun, Moon, Layers } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 const kindLabel: Record<string, string> = {
@@ -38,6 +38,7 @@ export function Header() {
   const settings = useApp((s) => s.settings);
   const providers = useApp((s) => s.providers);
   const setLogsOpen = useApp((s) => s.setLogsOpen);
+  const setCapabilitiesOpen = useApp((s) => s.setCapabilitiesOpen);
 
   const active = projects.find((p) => p.id === activeProjectId) ?? projects[0];
   const activeProvider = providers.find((p) => p.id === settings.providerId);
@@ -99,9 +100,27 @@ export function Header() {
         <Badge variant="outline" className="hidden md:inline-flex text-[11px] font-normal">
           {active?.stack}
         </Badge>
+        {active && active.targets.length > 1 && (
+          <Badge
+            variant="secondary"
+            className="hidden lg:inline-flex text-[10px] font-normal gap-1"
+          >
+            <Layers className="h-3 w-3" />
+            {active.targets.length} targets
+          </Badge>
+        )}
       </div>
 
       <div className="flex items-center gap-1.5">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="gap-1.5 hidden md:flex"
+          onClick={() => setCapabilitiesOpen(true)}
+        >
+          <Layers className="h-4 w-4" />
+          <span className="text-xs">Capabilities</span>
+        </Button>
         <Button
           variant="ghost"
           size="sm"

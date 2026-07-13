@@ -1,4 +1,4 @@
-// Minimal domain types for Pavan — autonomous AI software creator
+// Domain types for Pavan — autonomous AI software creator
 
 export type ProjectKind =
   | "windows"
@@ -15,14 +15,24 @@ export type ProjectKind =
   | "automation"
   | "auto";
 
+/** A single generation target within a project (multi-target aware). */
+export interface TargetSpec {
+  id: string;
+  kind: ProjectKind;
+  label: string; // e.g. "Desktop App", "Android Companion", "Web Admin Portal"
+  role: string; // what this target does in the solution
+  stack: string; // chosen toolchain, e.g. "WinUI 3 + .NET 8"
+}
+
 export interface ProjectMeta {
   id: string;
   name: string;
-  kind: ProjectKind;
-  stack: string; // chosen by the engine, e.g. "WinUI 3 + .NET 8"
+  kind: ProjectKind; // primary kind (for badges)
+  stack: string; // primary stack (for the header badge)
   description: string;
   createdAt: string;
   prompt: string; // original natural-language requirement
+  targets: TargetSpec[]; // one or more generation targets
 }
 
 export type ChatRole = "user" | "assistant" | "system";
@@ -33,7 +43,6 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   streaming?: boolean;
-  // lightweight structured "behind the scenes" note attached to assistant turns
   activity?: string;
 }
 
@@ -63,6 +72,7 @@ export interface Artifact {
   name: string;
   kind: "app" | "installer" | "package" | "docs" | "source";
   platform: string; // e.g. Windows, Web, Android
+  targetId?: string; // which generation target this belongs to
   sizeLabel: string;
   ready: boolean;
   url?: string;
@@ -96,3 +106,43 @@ export interface AISettings {
 }
 
 export type PreviewTarget = "web" | "windows" | "android";
+
+/** ---- Capability domain catalog ---- */
+
+export type AgentRole =
+  | "orchestrator"
+  | "planner"
+  | "architect"
+  | "selector"
+  | "coder"
+  | "reviewer"
+  | "tester"
+  | "debugger"
+  | "builder"
+  | "docs";
+
+export interface Agent {
+  id: AgentRole;
+  name: string; // persona name, e.g. "Atlas"
+  role: string; // human label, e.g. "Planner"
+  icon: string; // lucide icon key
+  color: string; // tailwind tint token
+  description: string;
+  skills: number; // count of owned skills (derived)
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  agent: AgentRole; // primary owning agent
+  tags?: string[];
+}
+
+export interface SkillCategory {
+  id: string;
+  name: string;
+  icon: string; // lucide icon key
+  description: string;
+}

@@ -8,7 +8,8 @@ import type {
   AISettings,
   PreviewTarget,
   StageId,
-  StageStatus,
+  TargetSpec,
+  ProjectKind,
 } from "./types";
 import {
   initialStages,
@@ -39,6 +40,7 @@ interface AppState {
   // ui
   settingsOpen: boolean;
   logsOpen: boolean;
+  capabilitiesOpen: boolean;
   isBuilding: boolean;
   input: string;
   streaming: boolean;
@@ -62,27 +64,36 @@ interface AppState {
   updateSettings: (patch: Partial<AISettings>) => void;
   setSettingsOpen: (v: boolean) => void;
   setLogsOpen: (v: boolean) => void;
+  setCapabilitiesOpen: (v: boolean) => void;
   addProject: (p: ProjectMeta) => void;
   clearChat: () => void;
 }
 
 let logCounter = 1000;
 
+function primaryPreviewTarget(targets: TargetSpec[]): PreviewTarget {
+  const k = targets[0]?.kind;
+  if (k === "android") return "android";
+  if (k === "web") return "web";
+  return "windows";
+}
+
 export const useApp = create<AppState>((set, get) => ({
   projects: seedProjects,
   activeProjectId: seedProjects[0].id,
   chat: seedChat,
   stages: initialStages.map((s) => ({ ...s })),
-  artifacts: makeArtifacts(seedProjects[0].name, seedProjects[0].kind),
+  artifacts: makeArtifacts(seedProjects[0].name, seedProjects[0].kind, seedProjects[0].targets),
   logs: seedLogs,
   providers: seedProviders,
   settings: defaultSettings,
-  previewTarget: "windows",
+  previewTarget: primaryPreviewTarget(seedProjects[0].targets),
   previewReady: false,
   hotReloading: false,
 
   settingsOpen: false,
   logsOpen: false,
+  capabilitiesOpen: false,
   isBuilding: false,
   input: "",
   streaming: false,
@@ -90,10 +101,12 @@ export const useApp = create<AppState>((set, get) => ({
   setActiveProject: (id) =>
     set((s) => {
       const p = s.projects.find((x) => x.id === id);
+      if (!p) return {};
       return {
         activeProjectId: id,
-        artifacts: p ? makeArtifacts(p.name, p.kind) : s.artifacts,
-        previewTarget: p?.kind === "android" ? "android" : p?.kind === "web" ? "web" : "windows",
+        artifacts: makeArtifacts(p.name, p.kind, p.targets),
+        previewTarget: primaryPreviewTarget(p.targets),
+        previewReady: false,
       };
     }),
 
@@ -112,29 +125,44 @@ export const useApp = create<AppState>((set, get) => ({
 
   startBuild: (prompt) => {
     const state = get();
-    const kind = inferKind(prompt);
-    const stack = inferStack(kind, prompt);
+    const targets = inferTargets(prompt);
+    const primaryKind = targets[0]?.kind ?? "web";
+    const primaryStack = targets[0]?.stack ?? "TypeScript";
     const name = inferName(prompt) || "New Project";
     const project: ProjectMeta = {
       id: `proj-${Date.now()}`,
       name,
-      kind: state.settings.autoDetectKind ? kind : "auto",
-      stack,
+      kind: state.settings.autoDetectKind ? primaryKind : "auto",
+      stack: primaryStack,
       description: prompt.slice(0, 120),
       createdAt: new Date().toISOString(),
       prompt,
+      targets,
     };
     set((s) => ({
       projects: [project, ...s.projects],
       activeProjectId: project.id,
-      artifacts: makeArtifacts(name, kind),
+      artifacts: makeArtifacts(name, primaryKind, targets),
       previewReady: false,
       isBuilding: true,
-      previewTarget: kind === "android" ? "android" : kind === "web" ? "web" : "windows",
+      previewTarget: primaryPreviewTarget(targets),
     }));
-    // reset stages and immediately start the first one
-    set({ stages: initialStages.map((st, i) => ({ ...st, status: i === 0 ? "running" : "pending", detail: undefined, durationMs: undefined })) });
-    get().addLog("info", "engine", `New project: ${name} · ${stack}`);
+    set({
+      stages: initialStages.map((st, i) => ({
+        ...st,
+        status: i === 0 ? "running" : "pending",
+        detail: undefined,
+        durationMs: undefined,
+      })),
+    });
+    const targetSummary =
+      targets.length > 1
+        ? `${targets.length} targets: ${targets.map((t) => t.label).join(", ")}`
+        : `${primaryStack}`;
+    get().addLog("info", "orchestrator", `New project: ${name} · ${targetSummary}`);
+    targets.forEach((t) =>
+      get().addLog("info", "selector", `Selected ${t.stack} for ${t.label}`)
+    );
   },
 
   setStage: (id, patch) =>
@@ -164,10 +192,9 @@ export const useApp = create<AppState>((set, get) => ({
       updated[nextIdx] = { ...updated[nextIdx], status: "running" };
       get().addLog("info", updated[nextIdx].id, `${updated[nextIdx].label}: ${updated[nextIdx].description}`);
     } else {
-      // all done
       get().setArtifactsReady(true);
       get().setPreviewReady(true);
-      get().addLog("success", "engine", "All stages complete. Deliverables ready.");
+      get().addLog("success", "orchestrator", "All stages complete. Deliverables ready.");
       set({ isBuilding: false });
     }
     set({ stages: updated });
@@ -197,77 +224,167 @@ export const useApp = create<AppState>((set, get) => ({
   updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
   setSettingsOpen: (v) => set({ settingsOpen: v }),
   setLogsOpen: (v) => set({ logsOpen: v }),
+  setCapabilitiesOpen: (v) => set({ capabilitiesOpen: v }),
 
   addProject: (p) => set((s) => ({ projects: [p, ...s.projects], activeProjectId: p.id })),
   clearChat: () => set({ chat: seedChat }),
 }));
 
-// Lightweight requirement reasoning — the engine picks a generator + toolchain.
-function inferKind(prompt: string): ProjectMeta["kind"] {
-  const p = prompt.toLowerCase();
-  if (/(windows|desktop|winui|wpf|winforms|\.net\s*(desktop|app)|win32)/.test(p)) return "windows";
-  if (/(android|mobile app|kotlin|flutter|play store)/.test(p)) return "android";
-  if (/(cli|command.line|terminal tool|brew install|cargo install)/.test(p)) return "cli";
-  if (/(api|rest|graphql|backend service|microservice)/.test(p)) return "api";
-  if (/(library|sdk|package for|npm package|crate)/.test(p)) return "library";
-  if (/(ai agent|autonomous agent|assistant service|chatbot)/.test(p)) return "ai-agent";
-  if (/(game|unity|godot|2d platformer|3d)/.test(p)) return "game";
-  if (/(automation|workflow|cron|batch|scrape)/.test(p)) return "automation";
-  if (/(marketing site|landing page|website|blog|portfolio|saas)/.test(p)) return "web";
-  return "web";
+/* ---------------- Requirement reasoning ---------------- */
+
+/**
+ * Detect one or more generation targets from a natural-language prompt.
+ * The engine reasons about intent and selects an appropriate toolchain per
+ * target rather than hard-coding "Windows", "Web", or "Android".
+ */
+function inferTargets(prompt: string): TargetSpec[] {
+  const p = " " + prompt.toLowerCase() + " ";
+  const targets: TargetSpec[] = [];
+  let n = 0;
+  const next = () => `t${++n}`;
+
+  const wantsWindows = /\b(windows|desktop|winui|wpf|winforms|win32|\.net\s*(desktop|app))\b/.test(p);
+  const wantsAndroid = /\b(android|mobile( app)?|kotlin|flutter|play store|companion app|phone app)\b/.test(p);
+  const wantsWeb = /\b(web( site| app| admin| portal)?|website|landing|marketing site|saas|portal|browser)\b/.test(p);
+  const wantsApi = /\b(api|rest( api)?|graphql|backend service|microservice|endpoints?)\b/.test(p);
+  const wantsCli = /\b(cli|command.line|terminal tool|brew install|cargo install)\b/.test(p);
+  const wantsAgent = /\b(ai agent|autonomous agent|assistant service|chatbot|support agent)\b/.test(p);
+  const wantsLibrary = /\b(library|sdk|npm package|crate|publish a package)\b/.test(p);
+  const wantsGame = /\b(game|unity|godot|2d platformer|3d game)\b/.test(p);
+
+  // Label targets by context if multiple
+  const multi = [wantsWindows, wantsAndroid, wantsWeb, wantsApi, wantsCli, wantsAgent, wantsLibrary, wantsGame].filter(Boolean).length > 1;
+
+  if (wantsWindows) {
+    targets.push({
+      id: next(),
+      kind: "windows",
+      label: multi ? "Desktop App" : "App",
+      role: multi ? "Primary desktop workspace" : "Windows desktop application",
+      stack: pickWindowsStack(p),
+    });
+  }
+  if (wantsAndroid) {
+    targets.push({
+      id: next(),
+      kind: "android",
+      label: multi ? "Android Companion" : "App",
+      role: multi ? "Mobile companion app" : "Android application",
+      stack: pickAndroidStack(p),
+    });
+  }
+  if (wantsWeb) {
+    targets.push({
+      id: next(),
+      kind: "web",
+      label: multi ? "Web Portal" : "App",
+      role: multi ? "Web admin portal" : "Web application",
+      stack: pickWebStack(p),
+    });
+  }
+  if (wantsApi) {
+    targets.push({
+      id: next(),
+      kind: "api",
+      label: "API Service",
+      role: "Backend API and data layer",
+      stack: pickApiStack(p),
+    });
+  }
+  if (wantsCli) {
+    targets.push({
+      id: next(),
+      kind: "cli",
+      label: "CLI Tool",
+      role: "Command-line utility",
+      stack: pickCliStack(p),
+    });
+  }
+  if (wantsAgent) {
+    targets.push({
+      id: next(),
+      kind: "ai-agent",
+      label: "AI Agent",
+      role: "Autonomous agent service",
+      stack: "Python + LangGraph",
+    });
+  }
+  if (wantsLibrary) {
+    targets.push({
+      id: next(),
+      kind: "library",
+      label: "Library",
+      role: "Reusable library / SDK",
+      stack: /\b(rust|crate)\b/.test(p) ? "Rust crate" : "TypeScript library",
+    });
+  }
+  if (wantsGame) {
+    targets.push({
+      id: next(),
+      kind: "game",
+      label: "Game",
+      role: "Interactive game",
+      stack: "Godot + GDScript",
+    });
+  }
+
+  if (targets.length === 0) {
+    // default: a web application
+    targets.push({
+      id: next(),
+      kind: "web",
+      label: "Web App",
+      role: "Web application",
+      stack: pickWebStack(p),
+    });
+  }
+  return targets;
 }
 
-function inferStack(kind: ProjectMeta["kind"], prompt: string): string {
-  const p = prompt.toLowerCase();
-  switch (kind) {
-    case "windows":
-      if (/tauri/.test(p)) return "Tauri + Rust";
-      if (/electron/.test(p)) return "Electron + TypeScript";
-      if (/avalonia/.test(p)) return "Avalonia + C#";
-      if (/(winforms|windows forms)/.test(p)) return "WinForms + .NET 8";
-      if (/(wpf)/.test(p)) return "WPF + .NET 8";
-      return "WinUI 3 + .NET 8";
-    case "android":
-      if (/(flutter|dart)/.test(p)) return "Flutter + Kotlin modules";
-      return "Kotlin + Jetpack Compose";
-    case "web":
-      if (/(wordpress|cms)/.test(p)) return "Next.js + Headless CMS";
-      return "Next.js + Node.js";
-    case "cli":
-      if (/(rust|cargo)/.test(p)) return "Rust + clap";
-      if (/(go\b|golang)/.test(p)) return "Go + cobra";
-      return "TypeScript + Commander";
-    case "api":
-      return "Node.js + Fastify + Prisma";
-    case "library":
-      if (/(rust|crate)/.test(p)) return "Rust crate";
-      return "TypeScript library";
-    case "ai-agent":
-      return "Python + LangGraph";
-    case "game":
-      return "Godot + GDScript";
-    case "automation":
-      return "Node.js + Playwright";
-    default:
-      return "TypeScript";
-  }
+function pickWindowsStack(p: string): string {
+  if (/\btauri\b/.test(p)) return "Tauri + Rust";
+  if (/\belectron\b/.test(p)) return "Electron + TypeScript";
+  if (/\bavalonia\b/.test(p)) return "Avalonia + C#";
+  if (/\b(winforms|windows forms)\b/.test(p)) return "WinForms + .NET 8";
+  if (/\bwpf\b/.test(p)) return "WPF + .NET 8";
+  return "WinUI 3 + .NET 8";
+}
+function pickAndroidStack(p: string): string {
+  if (/\b(flutter|dart)\b/.test(p)) return "Flutter + Kotlin modules";
+  if (/\breact native\b/.test(p)) return "React Native + TypeScript";
+  return "Kotlin + Jetpack Compose";
+}
+function pickWebStack(p: string): string {
+  if (/\b(wordpress|cms)\b/.test(p)) return "Next.js + Headless CMS";
+  if (/\bvue\b/.test(p)) return "Nuxt + Vue";
+  return "Next.js + Node.js";
+}
+function pickApiStack(p: string): string {
+  if (/\b(fastapi|python)\b/.test(p)) return "FastAPI + PostgreSQL";
+  if (/\b(spring|java|kotlin)\b/.test(p)) return "Spring Boot + PostgreSQL";
+  if (/\b(dotnet|c#|asp\.net)\b/.test(p)) return "ASP.NET Core + EF Core";
+  return "Node.js + Fastify + Prisma";
+}
+function pickCliStack(p: string): string {
+  if (/\b(rust|cargo)\b/.test(p)) return "Rust + clap";
+  if (/\b(go\b|golang)\b/.test(p)) return "Go + cobra";
+  return "TypeScript + Commander";
 }
 
 function inferName(prompt: string): string {
-  // Strip leading filler words repeatedly (build, create, make, a, an, the, i want, i need)
   let trimmed = prompt.trim().toLowerCase();
   let prev = "";
   while (prev !== trimmed) {
     prev = trimmed;
     trimmed = trimmed.replace(
-      /^(build|create|make|generate|develop|i want|i need|please|a|an|the|me|some)\s+/i,
+      /^(build|build me|create|make|generate|develop|i want|i need|please|a|an|the|me|some)\s+/i,
       ""
     );
   }
-  // Collect up to 3 meaningful words, stopping at common stopwords/prepositions
   const stopwords = new Set([
     "in", "that", "with", "for", "to", "and", "of", "on", "using", "via",
     "which", "from", "into", "where", "when", "app", "application", "as",
+    "companion", "portal", "admin", "me",
   ]);
   const words: string[] = [];
   for (const w of trimmed.split(/\s+/).filter(Boolean)) {
@@ -278,9 +395,7 @@ function inferName(prompt: string): string {
   if (words.length === 0) return "New Project";
   const acronyms = new Set(["cli", "ai", "api", "sdk", "saas", "ui", "ux", "ios", "ml", "crm", "cms", "erp", "hrm"]);
   const name = words
-    .map((w) =>
-      acronyms.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)
-    )
+    .map((w) => (acronyms.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
     .join(" ")
     .replace(/[^a-zA-Z0-9 ]/g, "")
     .trim();

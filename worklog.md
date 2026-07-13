@@ -67,3 +67,25 @@ Work Log:
 
 Stage Summary:
 - App is fully verified end-to-end in the browser. Chat streams real AI responses, the orchestration engine runs autonomously behind the scenes, live preview and status update automatically, and artifacts become available on completion. No client or server errors. Lint clean. The product is positioned as "Pavan — Autonomous AI Software Creator" with a minimal, chat-first interface.
+
+---
+Task ID: 5
+Agent: Z.ai Code (main)
+Task: Evolve Pavan to expose capability domains (60-100+ skills), visible multi-agent orchestration, and multi-target generation — while keeping the UI minimal.
+
+Work Log:
+- Extended `src/lib/types.ts` with Skill, SkillCategory, Agent (AgentRole), TargetSpec; extended ProjectMeta with `targets: TargetSpec[]` and Artifact with `targetId`.
+- Built a capability catalog in `src/lib/mock-data.ts`: 103 skills across 21 categories (Requirements, Architecture, Project Generation, Frontend, Windows Desktop, Android, Backend, Database, AI, API, Build & Packaging, Testing, Security, Debugging, Performance, DevOps, Documentation, Git, UX, Live Preview, Quality). Each skill is owned by one of 10 agents. Defined the 10-agent roster (Conductor/Orchestrator, Atlas/Planner, Vitruvius/Architect, Edison/Technology Selector, Forge/Coder, Sage/Reviewer, Probe/Tester, Hound/Debugger, Cargo/Build, Quill/Docs) with persona names, colors, and per-stage attribution (`stageAgentMap`). Derived per-agent skill counts. Extended `makeArtifacts` to produce per-target artifacts (MSIX/APK/web bundle) plus shared source/docs.
+- Rewrote requirement reasoning in `src/lib/store.ts`: replaced single-kind `inferKind` with `inferTargets(prompt)` that detects multiple generation targets from one request (Windows + Android + web + API + CLI + agent + library + game) and assigns a label, role, and chosen stack per target. `startBuild` now creates a multi-target project and logs a selection line per target. Added `capabilitiesOpen` UI state.
+- Built `src/components/pavan/capabilities-dialog.tsx`: browsable skill matrix with a header summary (skills · domains · agents), an agent strip showing all 10 agents with skill counts, a search box, category chips, and skills grouped by category with agent-ownership tags. Color-coded by agent.
+- Updated `src/components/pavan/status-panel.tsx`: each pipeline stage now shows agent-ownership chips (the agents responsible for that stage), with an animated dot on the active stage. Chip colors match agent personas.
+- Updated `src/components/pavan/preview-panel.tsx`: preview tabs are now derived from the project's targets — multi-target projects show one tab per target (e.g. "Desktop App", "Android Companion", "Web Portal"); single-target projects keep the Web/Windows/Android trio for cross-preview testing. Header shows a "N targets" indicator.
+- Updated `src/components/pavan/artifacts-panel.tsx`: multi-target projects group artifacts by target (with the chosen stack shown per group) plus a "Shared" section for source/docs.
+- Updated `src/components/pavan/header.tsx`: added a Capabilities button (opens the dialog) and a "N targets" badge for multi-target projects.
+- Updated the chat API system prompt so the LLM frames itself as a multi-agent engine, identifies multiple generation targets per request, and selects a stack per target.
+- Wired `CapabilitiesDialog` into `src/app/page.tsx`.
+
+Stage Summary:
+- Verified end-to-end with Agent Browser: sending "Build me a CRM desktop application with an Android companion app and a web admin portal" produced a 3-target project (Desktop App → WinUI 3/Tauri, Android Companion → Kotlin+Compose, Web Portal → Next.js). The header shows "3 targets", preview tabs show all three targets with correct frames, artifacts are grouped per target + shared, the status panel shows agent chips per stage (Atlas, Conductor, Vitruvius, Edison, Forge, Sage, Cargo, Hound), and the LLM streamed a coherent response naming all 3 targets and their stacks.
+- The Capabilities dialog renders 103 skills · 21 domains · 10 agents, with working search (e.g. "flutter" → Flutter skill under Android) and category filtering.
+- Lint clean. No client/server errors. Multi-target detection, agent attribution, and the capability catalog are all functional while the chat-first minimal UI is preserved.

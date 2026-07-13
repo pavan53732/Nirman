@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import type { Artifact, TargetSpec } from "@/lib/types";
 
 export function ArtifactsPanel() {
   const artifacts = useApp((s) => s.artifacts);
@@ -80,38 +81,101 @@ export function ArtifactsPanel() {
           />
         </div>
 
-        <div className="flex flex-col gap-1.5">
-          {artifacts.map((a) => (
-            <button
-              key={a.id}
-              onClick={() => a.ready && handleDownload(a.name)}
-              disabled={!a.ready}
-              className={cn(
-                "flex items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition",
-                a.ready
-                  ? "border-border bg-card hover:border-primary/40 hover:bg-accent/50 cursor-pointer"
-                  : "border-dashed border-border/60 bg-muted/30 opacity-60 cursor-not-allowed"
-              )}
-            >
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted">
-                {a.ready ? (
-                  <ArtifactIcon kind={a.kind} platform={a.platform} />
-                ) : (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                )}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="truncate text-[11px] font-medium">{a.name}</div>
-                <div className="text-[9px] text-muted-foreground">
-                  {a.platform} · {a.sizeLabel}
-                </div>
-              </div>
-              {a.ready && <Download className="h-3.5 w-3.5 text-muted-foreground" />}
-            </button>
-          ))}
-        </div>
+        <ArtifactsList artifacts={artifacts} targets={active?.targets ?? []} onDownload={handleDownload} />
       </div>
     </div>
+  );
+}
+
+function ArtifactsList({
+  artifacts,
+  targets,
+  onDownload,
+}: {
+  artifacts: Artifact[];
+  targets: TargetSpec[];
+  onDownload: (name: string) => void;
+}) {
+  const isMulti = targets.length > 1;
+  const targetArtifacts = artifacts.filter((a) => a.targetId);
+  const sharedArtifacts = artifacts.filter((a) => !a.targetId);
+
+  if (!isMulti) {
+    return (
+      <div className="flex flex-col gap-1.5">
+        {artifacts.map((a) => (
+          <ArtifactRow key={a.id} a={a} onDownload={onDownload} />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {targets.map((t) => {
+        const items = targetArtifacts.filter((a) => a.targetId === t.id);
+        if (items.length === 0) return null;
+        return (
+          <div key={t.id} className="flex flex-col gap-1">
+            <div className="flex items-center justify-between px-0.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {t.label}
+              </span>
+              <span className="text-[9px] text-muted-foreground truncate max-w-[140px]">{t.stack}</span>
+            </div>
+            {items.map((a) => (
+              <ArtifactRow key={a.id} a={a} onDownload={onDownload} />
+            ))}
+          </div>
+        );
+      })}
+      {sharedArtifacts.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-0.5">
+            Shared
+          </span>
+          {sharedArtifacts.map((a) => (
+            <ArtifactRow key={a.id} a={a} onDownload={onDownload} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArtifactRow({
+  a,
+  onDownload,
+}: {
+  a: Artifact;
+  onDownload: (name: string) => void;
+}) {
+  return (
+    <button
+      onClick={() => a.ready && onDownload(a.name)}
+      disabled={!a.ready}
+      className={cn(
+        "flex items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition",
+        a.ready
+          ? "border-border bg-card hover:border-primary/40 hover:bg-accent/50 cursor-pointer"
+          : "border-dashed border-border/60 bg-muted/30 opacity-60 cursor-not-allowed"
+      )}
+    >
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted">
+        {a.ready ? (
+          <ArtifactIcon kind={a.kind} platform={a.platform} />
+        ) : (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="truncate text-[11px] font-medium">{a.name}</div>
+        <div className="text-[9px] text-muted-foreground">
+          {a.platform} · {a.sizeLabel}
+        </div>
+      </div>
+      {a.ready && <Download className="h-3.5 w-3.5 text-muted-foreground" />}
+    </button>
   );
 }
 

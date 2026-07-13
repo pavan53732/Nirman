@@ -1,10 +1,22 @@
 "use client";
 
+import { useMemo } from "react";
 import { useApp } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { Monitor, Smartphone, Globe, RefreshCw, ExternalLink, Zap } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import type { PreviewTarget, ProjectMeta } from "@/lib/types";
+import { Monitor, Smartphone, Globe, RefreshCw, ExternalLink, Zap, Layers } from "lucide-react";
+import type { PreviewTarget, ProjectMeta, TargetSpec } from "@/lib/types";
+
+const kindToPreview: Record<string, PreviewTarget> = {
+  windows: "windows",
+  web: "web",
+  android: "android",
+};
+
+const previewIcon: Record<PreviewTarget, typeof Monitor> = {
+  web: Globe,
+  windows: Monitor,
+  android: Smartphone,
+};
 
 export function PreviewPanel() {
   const activeProjectId = useApp((s) => s.activeProjectId);
@@ -16,54 +28,83 @@ export function PreviewPanel() {
 
   const active = projects.find((p) => p.id === activeProjectId) ?? projects[0];
 
-  const tabs: { id: PreviewTarget; label: string; icon: typeof Monitor; show: boolean }[] = [
-    { id: "web", label: "Web", icon: Globe, show: true },
-    { id: "windows", label: "Windows", icon: Monitor, show: active?.kind !== "android" },
-    { id: "android", label: "Android", icon: Smartphone, show: true },
-  ];
+  // Derive preview tabs from the project's generation targets.
+  // Multi-target projects show one tab per target; single-target projects
+  // show the standard Web/Windows/Android trio for cross-preview testing.
+  const tabs = useMemo(() => {
+    if (!active) return [];
+    if (active.targets.length > 1) {
+      const seen = new Set<PreviewTarget>();
+      return active.targets
+        .map((t) => {
+          const pt = kindToPreview[t.kind];
+          if (!pt || seen.has(pt)) return null;
+          seen.add(pt);
+          return { id: pt, label: t.label, target: t };
+        })
+        .filter(Boolean) as { id: PreviewTarget; label: string; target: TargetSpec }[];
+    }
+    const base = [
+      { id: "web" as PreviewTarget, label: "Web", target: undefined },
+      { id: "windows" as PreviewTarget, label: "Windows", target: undefined },
+      { id: "android" as PreviewTarget, label: "Android", target: undefined },
+    ];
+    // For single-target projects, keep the trio but make the matching tab primary
+    return base
+      .filter((t) => active.kind === "android" ? t.id === "android" || t.id === "web" : true)
+      .filter((t) => active.kind === "web" ? t.id === "web" || t.id === "windows" : true)
+      .map((t) => ({ ...t, target: undefined as TargetSpec | undefined }));
+  }, [active]);
+
+  const activeTab = tabs.find((t) => t.id === previewTarget) ?? tabs[0];
+  const activeTargetKind = activeTab?.id ?? previewTarget;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2">
-        <div className="flex items-center gap-1.5">
-          <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground shrink-0">
             Live Preview
           </span>
+          {active && active.targets.length > 1 && (
+            <span className="flex items-center gap-1 text-[10px] text-muted-foreground shrink-0">
+              <Layers className="h-3 w-3" />
+              {active.targets.length} targets
+            </span>
+          )}
           {hotReloading && (
-            <span className="flex items-center gap-1 text-[10px] text-primary">
+            <span className="flex items-center gap-1 text-[10px] text-primary shrink-0">
               <Zap className="h-3 w-3" /> hot reload
             </span>
           )}
         </div>
-        <div className="flex items-center gap-0.5 rounded-lg bg-muted/60 p-0.5">
-          {tabs
-            .filter((t) => t.show)
-            .map((t) => {
-              const Icon = t.icon;
-              return (
-                <button
-                  key={t.id}
-                  onClick={() => setPreviewTarget(t.id)}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition",
-                    previewTarget === t.id
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">{t.label}</span>
-                </button>
-              );
-            })}
+        <div className="flex items-center gap-0.5 rounded-lg bg-muted/60 p-0.5 overflow-x-auto max-w-full">
+          {tabs.map((t) => {
+            const Icon = previewIcon[t.id];
+            return (
+              <button
+                key={t.id}
+                onClick={() => setPreviewTarget(t.id)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition whitespace-nowrap",
+                  activeTargetKind === t.id
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0" />
+                <span className="hidden sm:inline">{t.label}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
       <div className="relative flex-1 min-h-0 overflow-hidden bg-muted/30 p-3">
         {previewReady ? (
-          <PreviewFrame target={previewTarget} project={active} />
+          <PreviewFrame target={activeTargetKind} project={active} />
         ) : (
-          <PreviewBuilding target={previewTarget} project={active} />
+          <PreviewBuilding target={activeTargetKind} project={active} />
         )}
       </div>
     </div>
