@@ -286,34 +286,36 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
   const [showKey, setShowKey] = useState(false);
   const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const providerRef = useRef(provider);
+  useEffect(() => { providerRef.current = provider; }, [provider]);
 
-  // Debounced auto-test
+  // Debounced auto-test — reads from ref to avoid stale closures
   const autoTest = useCallback(() => {
-    if (!provider.enabled) return;
+    const p = providerRef.current;
+    if (!p.enabled) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
+      const pp = providerRef.current;
       // Validate
-      if (!provider.baseUrl || !/^https?:\/\/.+/.test(provider.baseUrl)) {
+      if (!pp.baseUrl || !/^https?:\/\/.+/.test(pp.baseUrl)) {
         setBaseUrlError("Base URL must start with http:// or https://");
         return;
       }
       setBaseUrlError(null);
-      if (!provider.modelName) return;
-      if (provider.id !== "ollama" && !provider.apiKey) return;
-      testProviderConnection(provider, (success, latencyMs, error) => {
-        if (!success) {
-          // silent — status dot updates
-        }
+      if (!pp.modelName) return;
+      if (pp.id !== "ollama" && !pp.apiKey) return;
+      testProviderConnection(pp, () => {
+        // silent — status dot updates via store
       });
     }, 800);
-  }, [provider.enabled, provider.baseUrl, provider.modelName, provider.apiKey, provider.id]);
+  }, []);
 
-  // Auto-test on blur and on enable
+  // Auto-test on enable
   useEffect(() => {
     if (provider.enabled && provider.status === "idle") {
       autoTest();
     }
-  }, [provider.enabled]);
+  }, [provider.enabled, provider.status, autoTest]);
 
   const handleTest = () => {
     if (!provider.baseUrl || !/^https?:\/\/.+/.test(provider.baseUrl)) {
