@@ -245,20 +245,50 @@ export class Orchestrator {
         // workspace write is best-effort; gates will skip if no workspace
       }
     }
-    // Annotate compilation gate tasks with the first web workspace path
+    // Annotate the compilation gate task with the web workspace (runs tsc).
+    // For multi-target builds, attach the primary target's workspace + type.
+    // Desktop/android static validation happens via their own gate tasks below.
     const webWorkspace = workspacePaths["t1"] ?? Object.values(workspacePaths)[0] ?? undefined;
+    const primaryTarget = targets[0];
+    const primaryType = primaryTarget?.kind === "windows" ? "desktop" : primaryTarget?.kind === "android" ? "android" : "web";
     for (const task of tasks) {
       if (task.gate === "compilation" && webWorkspace) {
         (task as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext = {
           workspacePath: webWorkspace,
           artifactCount: totalFiles,
+          targetType: primaryType,
         };
       }
-      // Attach toolId + cwd to the build stage task so it runs npm-build
-      if (task.stageId === "build" && !task.gate && webWorkspace) {
+      // Attach toolId + cwd to the build stage task so it runs npm-build (web only)
+      if (task.stageId === "build" && !task.gate && webWorkspace && primaryTarget?.kind === "web") {
         task.toolId = "npm-build";
         (task as Task & { args?: { cwd?: string } }).args = { cwd: webWorkspace };
       }
+    }
+
+    // For multi-target builds, add per-target compilation gate tasks for
+    // desktop/android so their static validators run too.
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
+      const wsPath = workspacePaths[`t${i + 1}`];
+      if (!wsPath) continue;
+      const tType = t.kind === "windows" ? "desktop" : t.kind === "android" ? "android" : null;
+      if (!tType || tType === primaryType) continue; // skip, already covered
+      const extraGate = makeTask({
+        workflowId: workflow.id,
+        stageId: "build",
+        title: `Gate: compilation (${tType})`,
+        description: `Static validation for ${t.label}`,
+        agent: "orchestrator" as AgentRole,
+        dependsOn: [],
+        gate: "compilation" as GateId,
+      });
+      (extraGate as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext = {
+        workspacePath: wsPath,
+        artifactCount: totalFiles,
+        targetType: tType as "desktop" | "android",
+      };
+      tasks.push(extraGate);
     }
 
     // Token budget check

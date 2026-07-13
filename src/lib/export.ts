@@ -6,7 +6,7 @@
 // falls back to a zip download. Must work offline.
 
 import type { ProjectMeta } from "./types";
-import { artifactRegistry, projectMemory, registries, generateForTarget } from "./engine";
+import { artifactRegistry, projectMemory, registries, generateForTarget, detectCapabilities, detectNonFunctionals } from "./engine";
 
 export interface ExportResult {
   ok: boolean;
@@ -25,7 +25,10 @@ function assembleSolution(project: ProjectMeta): VirtualFile[] {
   const files: VirtualFile[] = [];
 
   // Per-target folders: invoke the real generator for each target and place
-  // its output files under the platform-appropriate folder.
+  // its output files under the platform-appropriate folder. Pass ctx (prompt +
+  // capabilities + non-functionals) so the real generators produce full apps.
+  const caps = detectCapabilities(project.prompt);
+  const nfs = detectNonFunctionals(project.prompt);
   for (const t of project.targets) {
     const folder =
       t.kind === "windows" ? "desktop" :
@@ -34,7 +37,11 @@ function assembleSolution(project: ProjectMeta): VirtualFile[] {
       t.kind === "api" ? "backend" :
       t.kind === "cli" ? "cli" :
       t.kind === "library" ? "library" : "app";
-    const gen = generateForTarget(t.kind, t.stack, project.name, t.id);
+    const gen = generateForTarget(t.kind, t.stack, project.name, t.id, {
+      prompt: project.prompt,
+      capabilities: caps,
+      nonFunctionals: nfs,
+    });
     for (const f of gen.files) {
       files.push({ path: `${folder}/${f.path}`, content: f.content });
     }

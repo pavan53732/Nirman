@@ -81,12 +81,19 @@ export interface GateEvaluationContext {
   workspacePath?: string;
   /** Artifacts produced (for structural gates). */
   artifactCount?: number;
+  /** Target type for selecting the right validator (web/desktop/android). */
+  targetType?: "web" | "desktop" | "android";
 }
 
 /**
  * Evaluate a gate for real. Compilation/lint gates call the ToolManager via
  * the client tool bridge; structural gates check artifact presence.
- * Returns { passed, detail, metric } — no Math.random().
+ * Returns { passed, detail, metric } — no Math.random(), no forced true.
+ *
+ * For desktop/android targets where the SDK (dotnet/gradle) is not installed,
+ * the compilation gate runs static validators (XML/Kotlin/Gradle syntax checks)
+ * via /api/validate instead of a live compiler. This gives real gate evaluation
+ * without the SDK.
  */
 export async function evaluateGate(
   gate: GateId,
@@ -105,27 +112,61 @@ export async function evaluateGate(
     };
   }
 
-  // Compilation gate: run `tsc --noEmit` against the workspace.
+  // Compilation gate: run the appropriate validator for the target type.
   if (gate === "compilation") {
     if (!ctx.workspacePath) {
       return { gate, passed: false, detail: `${meta.label}: no workspace path to typecheck.`, metric: "skipped" };
     }
-    try {
-      // Lazy import to keep server-only code out of the client bundle.
-      const { invokeToolClient } = await import("./tool-client");
-      const result = await invokeToolClient("tsc-no-emit", { cwd: ctx.workspacePath });
-      const passed = result.success;
-      return {
-        gate,
-        passed,
-        detail: passed
-          ? `${meta.label}: tsc --noEmit passed in ${result.durationMs}ms.`
-          : `${meta.label}: tsc failed (${result.errors?.length ?? 0} errors).`,
-        metric: passed ? "0 errors" : `${result.errors?.length ?? "?"} errors`,
-      };
-    } catch (err) {
-      return { gate, passed: false, detail: `${meta.label}: tool error ${String(err)}`, metric: "error" };
+
+    // Web target: run real `tsc --noEmit` (Node + TS available in sandbox)
+    if (ctx.targetType === "web") {
+      try {
+        const { invokeToolClient } = await import("./tool-client");
+        const result = await invokeToolClient("tsc-no-emit", { cwd: ctx.workspacePath });
+        return {
+          gate,
+          passed: result.success,
+          detail: result.success
+            ? `${meta.label}: tsc --noEmit passed in ${result.durationMs}ms.`
+            : `${meta.label}: tsc failed (${result.errors?.length ?? 0} errors).`,
+          metric: result.success ? "0 errors" : `${result.errors?.length ?? "?"} errors`,
+        };
+      } catch (err) {
+        return { gate, passed: false, detail: `${meta.label}: tsc tool error ${String(err)}`, metric: "error" };
+      }
     }
+
+    // Desktop/Android targets: run static validators (no SDK needed)
+    if (ctx.targetType === "desktop" || ctx.targetType === "android") {
+      try {
+        const res = await fetch("/api/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspacePath: ctx.workspacePath, target: ctx.targetType }),
+        });
+        if (!res.ok) {
+          return { gate, passed: false, detail: `${meta.label}: validate API error ${res.status}`, metric: "error" };
+        }
+        const data = await res.json();
+        const passed = data.success as boolean;
+        const details = (data.validations as { file: string; tool: string; result: { stdout: string; stderr: string; checks: { name: string; passed: boolean }[] } }[])
+          .map((v) => `${v.file}: ${v.result.stdout || v.result.stderr || "no output"}`)
+          .join("; ");
+        return {
+          gate,
+          passed,
+          detail: passed
+            ? `${meta.label}: static validation passed (${data.fileCount} files). ${details}`
+            : `${meta.label}: static validation FAILED. ${details}`,
+          metric: passed ? "static-valid" : "static-invalid",
+        };
+      } catch (err) {
+        return { gate, passed: false, detail: `${meta.label}: validator error ${String(err)}`, metric: "error" };
+      }
+    }
+
+    // Fallback: no target type specified
+    return { gate, passed: false, detail: `${meta.label}: no target type for compilation gate.`, metric: "skipped" };
   }
 
   // Fallback (should not reach)

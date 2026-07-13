@@ -358,19 +358,23 @@ fun PavanTheme(
 `,
   });
 
-  // ---- data/local/<Entity>Entity.kt (Room) ----
-  if (useRoom) {
+  // ---- data/local/<Entity>Entity.kt ----
+  // Always generate the data class. When Room is enabled, add @Entity + @PrimaryKey
+  // annotations; when disabled, it's a plain data class used for in-memory state.
+  {
     files.push({
       path: `app/src/main/java/${pkgPath}/data/local/${entity}Entity.kt`,
       language: "kotlin",
       content: `package ${pkgName}.data.local
-
+${useRoom ? `
 import androidx.room.Entity
 import androidx.room.PrimaryKey
-
-@Entity(tableName = "${entityRoute}s")
-data class ${entity}Entity(
-    @PrimaryKey val id: String = java.util.UUID.randomUUID().toString(),
+` : ""}/**
+ * ${entity} data model.${useRoom ? " Room entity (offline-first persistence)." : " In-memory model (no persistence layer)."}
+ */
+${useRoom ? `@Entity(tableName = "${entityRoute}s")
+` : ""}data class ${entity}Entity(
+    ${useRoom ? "@PrimaryKey " : ""}val id: String = java.util.UUID.randomUUID().toString(),
     val name: String,
     val description: String? = null,
     val quantity: Int = 0,
@@ -380,7 +384,10 @@ data class ${entity}Entity(
 )
 `,
     });
+  }
 
+  // ---- Room DAO + Database + Repository (only when offline-sync) ----
+  if (useRoom) {
     files.push({
       path: `app/src/main/java/${pkgPath}/data/local/${entity}Dao.kt`,
       language: "kotlin",
