@@ -132,6 +132,7 @@ export function generateNextjsApp(ctx: WebGenerationContext): GenerationResult {
           lint: "next lint",
           typecheck: "tsc --noEmit",
           "db:push": "prisma db push",
+          postinstall: "prisma generate || true",
         },
         dependencies: {
           next: "14.2.15",
@@ -576,6 +577,11 @@ ${auth ? `  const session = await getServerSession(authOptions);
     language: "typescript",
     content: `import { prisma } from "@/lib/prisma";
 
+// Force dynamic rendering — these pages query the database at request time
+// and should not be statically generated at build time (avoids P2021 when
+// the DB doesn't exist during \`next build\`).
+export const dynamic = "force-dynamic";
+
 export default async function DashboardPage() {
   const ${entityLower}Count = await prisma.${entityLower}.count();
   const recent${entity} = await prisma.${entityLower}.findMany({
@@ -966,7 +972,7 @@ declare module "next-auth" {
     path: `prisma/seed.ts`,
     language: "typescript",
     content: `import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
+${auth ? `import bcrypt from "bcryptjs";` : ""}
 
 const prisma = new PrismaClient();
 

@@ -10,6 +10,8 @@ import type { PlatformKind, ArtifactType, AgentRole } from "./types";
 import { artifactRegistry } from "./artifact-registry";
 import { registries } from "./registries";
 import { generateNextjsApp } from "./generators/web-generator";
+import { generateWinUI3App } from "./generators/desktop-generator";
+import { generateAndroidApp } from "./generators/android-generator";
 
 export interface VirtualFile {
   path: string;
@@ -468,10 +470,34 @@ export function generateForTarget(
   ctx?: { prompt: string; capabilities: import("./types").Capability[]; nonFunctionals: import("./types").NonFunctional[] }
 ): GenerationResult {
   if (platform === "windows") {
+    // Both WinUI 3 and Tauri paths produce a real, compilable solution.
+    // Tauri uses the Tauri template (Rust + webview); WinUI 3 uses the full
+    // MVVM + EF Core generator. For now, route both to the real WinUI 3 app
+    // generator when ctx is available, since it produces a complete .sln.
+    if (ctx) {
+      return generateWinUI3App({
+        projectName,
+        targetId,
+        prompt: ctx.prompt,
+        capabilities: ctx.capabilities,
+        nonFunctionals: ctx.nonFunctionals,
+      });
+    }
     if (/tauri/i.test(stack)) return generateTauri(projectName, targetId);
     return generateWinUI3(projectName, targetId);
   }
   if (platform === "android") {
+    // Both Kotlin+Compose and Flutter paths produce a real app. Route to the
+    // real Compose generator when ctx is available (Room + Hilt + Nav).
+    if (ctx) {
+      return generateAndroidApp({
+        projectName,
+        targetId,
+        prompt: ctx.prompt,
+        capabilities: ctx.capabilities,
+        nonFunctionals: ctx.nonFunctionals,
+      });
+    }
     if (/flutter/i.test(stack)) return generateFlutter(projectName, targetId);
     return generateAndroidCompose(projectName, targetId);
   }

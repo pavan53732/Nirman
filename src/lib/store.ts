@@ -170,7 +170,14 @@ export const useApp = create<AppState>((set, get) => ({
     // Run the orchestrator (async: submits DAG to execution engine after
     // materializing generated files to the on-disk workspace).
     void (async () => {
-      const result = await orchestrator.startBuild(prompt);
+      let result;
+      try {
+        result = await orchestrator.startBuild(prompt);
+      } catch (err) {
+        get().addLog("error", "orchestrator", `startBuild failed: ${String(err)}`);
+        console.error("[Pavan] orchestrator.startBuild failed:", err);
+        return;
+      }
 
       // Autonomy gate: if ambiguous, surface the question and don't start.
       if (result.pendingQuestion) {
