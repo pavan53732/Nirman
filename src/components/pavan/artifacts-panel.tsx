@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import {
   Download,
   Play,
-  Rocket,
   ScrollText,
   FileArchive,
   FileText,
@@ -14,6 +13,7 @@ import {
   Globe,
   Smartphone,
   Loader2,
+  FolderOutput,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -22,6 +22,7 @@ import type { Artifact, TargetSpec } from "@/lib/types";
 export function ArtifactsPanel() {
   const artifacts = useApp((s) => s.artifacts);
   const setLogsOpen = useApp((s) => s.setLogsOpen);
+  const setExportOpen = useApp((s) => s.setExportOpen);
   const isBuilding = useApp((s) => s.isBuilding);
   const previewReady = useApp((s) => s.previewReady);
   const activeProjectId = useApp((s) => s.activeProjectId);
@@ -33,18 +34,6 @@ export function ArtifactsPanel() {
   const handleDownload = (name: string) => {
     toast.success(`Preparing ${name}`, {
       description: "Your download will start momentarily.",
-    });
-  };
-
-  const handleRun = () => {
-    toast.info("Launching preview", {
-      description: `Running ${active?.name} in the live preview above.`,
-    });
-  };
-
-  const handlePublish = () => {
-    toast.success("Publishing started", {
-      description: "Pavan is preparing a release and will publish when ready.",
     });
   };
 
@@ -61,16 +50,17 @@ export function ArtifactsPanel() {
 
       <div className="ide-scroll flex-1 min-h-0 overflow-y-auto px-3 py-3">
         <div className="grid grid-cols-3 gap-1.5 mb-3">
+          {/* Run is intentionally disabled — local export only, no run/publish of deliverables */}
           <ActionButton
             icon={Play}
             label="Run"
-            onClick={handleRun}
-            disabled={isBuilding || !previewReady}
+            onClick={() => {}}
+            disabled
           />
           <ActionButton
-            icon={Rocket}
-            label="Publish"
-            onClick={handlePublish}
+            icon={FolderOutput}
+            label="Export"
+            onClick={() => setExportOpen(true)}
             disabled={isBuilding || !previewReady}
             accent
           />

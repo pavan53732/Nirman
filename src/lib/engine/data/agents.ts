@@ -1,0 +1,86 @@
+import type { Agent } from "../types";
+
+// Agent Registry — 6 layers + cross-cutting + dynamic sub-agents.
+export const agents: Agent[] = [
+  // Layer 1 — Executive (5, always active)
+  { id: "orchestrator", role: "orchestrator", name: "Conductor", layer: "executive", icon: "network", color: "emerald", description: "Coordinates all agents and the end-to-end pipeline.", alwaysActive: true },
+  { id: "project-manager", role: "project-manager", name: "Foreman", layer: "executive", icon: "clipboard-list", color: "emerald", description: "Tracks project state, milestones, and progress.", alwaysActive: true },
+  { id: "planner", role: "planner", name: "Atlas", layer: "executive", icon: "list-checks", color: "amber", description: "Decomposes requirements into a dependency-ordered plan.", alwaysActive: true },
+  { id: "decision-engine", role: "decision-engine", name: "Oracle", layer: "executive", icon: "git-fork", color: "violet", description: "Applies reusable decision policies; logs alternatives rejected.", alwaysActive: true },
+  { id: "context-builder", role: "context-builder", name: "Prism", layer: "executive", icon: "layers", color: "sky", description: "Builds minimal prompt packs per agent from indexes & memory.", alwaysActive: true },
+
+  // Layer 2 — Architecture (12)
+  { id: "requirements-analyst", role: "requirements-analyst", name: "Scribe", layer: "architecture", icon: "file-text", color: "amber", description: "Parses requirements and detects ambiguity." },
+  { id: "business-analyst", role: "business-analyst", name: "Bridge", layer: "architecture", icon: "briefcase", color: "amber", description: "Translates business needs into user stories." },
+  { id: "domain-expert", role: "domain-expert", name: "Sage", layer: "architecture", icon: "graduation-cap", color: "amber", description: "Provides domain-specific modeling guidance." },
+  { id: "solution-architect", role: "solution-architect", name: "Vitruvius", layer: "architecture", icon: "drafting-compass", color: "violet", description: "Designs end-to-end system structure." },
+  { id: "software-architect", role: "software-architect", name: "Keystone", layer: "architecture", icon: "boxes", color: "violet", description: "Defines module boundaries and patterns." },
+  { id: "platform-architect", role: "platform-architect", name: "Span", layer: "architecture", icon: "layers", color: "violet", description: "Coordinates multi-target platform architecture." },
+  { id: "database-architect", role: "database-architect", name: "Vault", layer: "architecture", icon: "database", color: "violet", description: "Designs data models and persistence." },
+  { id: "api-architect", role: "api-architect", name: "Contract", layer: "architecture", icon: "webhook", color: "violet", description: "Designs API surfaces and protocols." },
+  { id: "uiux-architect", role: "uiux-architect", name: "Canvas", layer: "architecture", icon: "palette", color: "violet", description: "Designs UX, layouts, and design systems." },
+  { id: "security-architect", role: "security-architect", name: "Bastion", layer: "architecture", icon: "shield-check", color: "red", description: "Designs auth, authz, and threat models." },
+  { id: "ai-architect", role: "ai-architect", name: "Synapse", layer: "architecture", icon: "brain-circuit", color: "violet", description: "Designs AI/ML and agent systems." },
+  { id: "infrastructure-architect", role: "infrastructure-architect", name: "Pillar", layer: "architecture", icon: "server", color: "violet", description: "Designs deployment and infrastructure." },
+
+  // Layer 3 — Engineering generators (25)
+  { id: "frontend-generator", role: "frontend-generator", name: "Forge", layer: "engineering", icon: "code", color: "emerald", description: "Generates React/Vue/Angular/Svelte/HTML frontend code." },
+  { id: "desktop-generator", role: "desktop-generator", name: "Anvil", layer: "engineering", icon: "monitor", color: "emerald", description: "Generates WinUI/WPF/WinForms/Avalonia/Tauri/Electron/Win32 desktop code." },
+  { id: "android-generator", role: "android-generator", name: "Droid", layer: "engineering", icon: "smartphone", color: "emerald", description: "Generates Kotlin/Compose/Flutter/RN Android code." },
+  { id: "backend-generator", role: "backend-generator", name: "Crucible", layer: "engineering", icon: "server", color: "emerald", description: "Generates ASP.NET/Node/NestJS/FastAPI/Spring backends." },
+  { id: "database-generator", role: "database-generator", name: "Strata", layer: "engineering", icon: "database", color: "emerald", description: "Generates SQL/Postgres/SQLite/Mongo/Redis schemas & access." },
+  { id: "ai-generator", role: "ai-generator", name: "Cortex", layer: "engineering", icon: "brain-circuit", color: "emerald", description: "Generates LLM/RAG/embedding/agent-workflow code." },
+
+  // Layer 4 — Quality & Delivery (18)
+  { id: "code-reviewer", role: "code-reviewer", name: "Sage", layer: "quality", icon: "scan-search", color: "teal", description: "Reviews diffs for correctness and quality." },
+  { id: "static-analyzer", role: "static-analyzer", name: "Lens", layer: "quality", icon: "search", color: "teal", description: "Runs Roslyn/ESLint/Clippy/detekt." },
+  { id: "security-auditor", role: "security-auditor", name: "Sentinel", layer: "quality", icon: "shield-alert", color: "red", description: "Audits secure-coding and OWASP issues." },
+  { id: "dependency-auditor", role: "dependency-auditor", name: "Quartermaster", layer: "quality", icon: "package-search", color: "teal", description: "Audits dependency advisories and licenses." },
+  { id: "performance-optimizer", role: "performance-optimizer", name: "Velocity", layer: "quality", icon: "gauge", color: "teal", description: "Profiles and optimizes hot paths." },
+  { id: "memory-optimizer", role: "memory-optimizer", name: "Lean", layer: "quality", icon: "activity", color: "teal", description: "Analyzes and reduces memory usage." },
+  { id: "accessibility-auditor", role: "accessibility-auditor", name: "Equalize", layer: "quality", icon: "accessibility", color: "teal", description: "Audits WCAG, ARIA, and contrast." },
+  { id: "documentation-writer", role: "documentation-writer", name: "Quill", layer: "quality", icon: "book-open", color: "indigo", description: "Generates READMEs, API refs, and guides." },
+  { id: "test-generator", role: "test-generator", name: "Probe", layer: "quality", icon: "flask-conical", color: "rose", description: "Generates test cases from code and specs." },
+  { id: "unit-test-agent", role: "unit-test-agent", name: "Pinpoint", layer: "quality", icon: "target", color: "rose", description: "Runs unit test suites." },
+  { id: "integration-test-agent", role: "integration-test-agent", name: "Mesh", layer: "quality", icon: "share-2", color: "rose", description: "Runs integration and regression tests." },
+  { id: "ui-test-agent", role: "ui-test-agent", name: "Mirage", layer: "quality", icon: "eye", color: "rose", description: "Runs UI/E2E tests via Playwright/Appium." },
+  { id: "build-engineer", role: "build-engineer", name: "Cargo", layer: "quality", icon: "hammer", color: "cyan", description: "Compiles solutions across all toolchains." },
+  { id: "packaging-engineer", role: "packaging-engineer", name: "Bundle", layer: "quality", icon: "package", color: "cyan", description: "Packages installers, MSIX, APK, AAB." },
+  { id: "release-engineer", role: "release-engineer", name: "Deploy", layer: "quality", icon: "rocket", color: "cyan", description: "Manages releases and CI/CD." },
+  { id: "export-manager", role: "export-manager", name: "Porter", layer: "quality", icon: "folder-output", color: "cyan", description: "Exports the complete solution to a local folder." },
+  { id: "migration-agent", role: "migration-agent", name: "Bridge", layer: "quality", icon: "arrow-left-right", color: "teal", description: "Migrates code across frameworks/versions." },
+  { id: "refactoring-agent", role: "refactoring-agent", name: "Refine", layer: "quality", icon: "wand-2", color: "teal", description: "Performs safe refactors and debt reduction." },
+
+  // Layer 5 — Cross-cutting services (10)
+  { id: "project-memory-manager", role: "project-memory-manager", name: "Archive", layer: "cross-cutting", icon: "archive", color: "indigo", description: "Owns 7-layer memory persistence with version history." },
+  { id: "knowledge-base-manager", role: "knowledge-base-manager", name: "Indexer", layer: "cross-cutting", icon: "library", color: "indigo", description: "Maintains symbol/xref/type/file/API/dep/semantic/code/arch indexes." },
+  { id: "artifact-manager", role: "artifact-manager", name: "Curator", layer: "cross-cutting", icon: "box", color: "indigo", description: "Tracks versioned artifacts with lineage." },
+  { id: "tool-manager", role: "tool-manager", name: "Wrench", layer: "cross-cutting", icon: "wrench", color: "indigo", description: "Invokes and sandboxes tools." },
+  { id: "skill-manager", role: "skill-manager", name: "Maestro", layer: "cross-cutting", icon: "sparkles", color: "indigo", description: "Resolves skills to agents and tools." },
+  { id: "provider-manager", role: "provider-manager", name: "Switchboard", layer: "cross-cutting", icon: "plug", color: "indigo", description: "Manages AI provider connections." },
+  { id: "model-router", role: "model-router", name: "Router", layer: "cross-cutting", icon: "route", color: "indigo", description: "Routes tasks to the optimal model." },
+  { id: "cost-optimizer", role: "cost-optimizer", name: "Frugal", layer: "cross-cutting", icon: "coins", color: "indigo", description: "Optimizes cost across providers." },
+  { id: "token-budget-manager", role: "token-budget-manager", name: "Budget", layer: "cross-cutting", icon: "gauge", color: "indigo", description: "Enforces per-agent and per-workflow token budgets." },
+  { id: "cache-manager", role: "cache-manager", name: "Cache", layer: "cross-cutting", icon: "database-zap", color: "indigo", description: "Caches prompts, embeddings, and results." },
+
+  // Layer 6 — Dynamic sub-agents (20, spawned on demand)
+  { id: "auth-specialist", role: "auth-specialist", name: "Keymaster", layer: "dynamic", icon: "key-round", color: "orange", description: "Auth flows and identity providers.", spawnedBy: "auth" },
+  { id: "payments-specialist", role: "payments-specialist", name: "Till", layer: "dynamic", icon: "credit-card", color: "orange", description: "Payments and billing integration.", spawnedBy: "payments" },
+  { id: "notifications-specialist", role: "notifications-specialist", name: "Chime", layer: "dynamic", icon: "bell", color: "orange", description: "Push/in-app notifications.", spawnedBy: "notifications" },
+  { id: "email-specialist", role: "email-specialist", name: "Post", layer: "dynamic", icon: "mail", color: "orange", description: "Email sending and templates.", spawnedBy: "on-demand" },
+  { id: "ocr-specialist", role: "ocr-specialist", name: "Scan", layer: "dynamic", icon: "scan-text", color: "orange", description: "OCR document extraction.", spawnedBy: "on-demand" },
+  { id: "pdf-specialist", role: "pdf-specialist", name: "Folio", layer: "dynamic", icon: "file-text", color: "orange", description: "PDF generation and parsing.", spawnedBy: "pdf" },
+  { id: "reporting-specialist", role: "reporting-specialist", name: "Ledger", layer: "dynamic", icon: "bar-chart-3", color: "orange", description: "Reports and exports.", spawnedBy: "on-demand" },
+  { id: "charts-specialist", role: "charts-specialist", name: "Plot", layer: "dynamic", icon: "line-chart", color: "orange", description: "Chart and visualization components.", spawnedBy: "on-demand" },
+  { id: "filesystem-specialist", role: "filesystem-specialist", name: "Drawer", layer: "dynamic", icon: "folder", color: "orange", description: "File system operations.", spawnedBy: "on-demand" },
+  { id: "bluetooth-specialist", role: "bluetooth-specialist", name: "Beacon", layer: "dynamic", icon: "bluetooth", color: "orange", description: "Bluetooth integration.", spawnedBy: "bluetooth" },
+  { id: "camera-specialist", role: "camera-specialist", name: "Lens", layer: "dynamic", icon: "camera", color: "orange", description: "Camera capture and processing.", spawnedBy: "camera" },
+  { id: "printing-specialist", role: "printing-specialist", name: "Press", layer: "dynamic", icon: "printer", color: "orange", description: "Printing support.", spawnedBy: "printing" },
+  { id: "barcode-specialist", role: "barcode-specialist", name: "Stripe", layer: "dynamic", icon: "qr-code", color: "orange", description: "Barcode/QR scanning and generation.", spawnedBy: "barcode" },
+  { id: "localization-specialist", role: "localization-specialist", name: "Lingua", layer: "dynamic", icon: "languages", color: "orange", description: "i18n and l10n.", spawnedBy: "on-demand" },
+  { id: "theme-specialist", role: "theme-specialist", name: "Hue", layer: "dynamic", icon: "swatch-book", color: "orange", description: "Theming and dark mode.", spawnedBy: "on-demand" },
+  { id: "offline-sync-specialist", role: "offline-sync-specialist", name: "Tether", layer: "dynamic", icon: "refresh-cw", color: "orange", description: "Offline-first sync engines.", spawnedBy: "offline-sync" },
+  { id: "search-specialist", role: "search-specialist", name: "Compass", layer: "dynamic", icon: "search", color: "orange", description: "Full-text and faceted search.", spawnedBy: "on-demand" },
+  { id: "background-service-specialist", role: "background-service-specialist", name: "Daemon", layer: "dynamic", icon: "clock", color: "orange", description: "Background services and workers.", spawnedBy: "on-demand" },
+  { id: "installer-specialist", role: "installer-specialist", name: "Setup", layer: "dynamic", icon: "package-plus", color: "orange", description: "Installer authoring.", spawnedBy: "on-demand" },
+];

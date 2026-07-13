@@ -11,7 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Settings, ChevronDown, Plus, Bot, Sun, Moon, Layers } from "lucide-react";
+import { Settings, ChevronDown, Plus, Bot, Sun, Moon, Layers, FolderOutput } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 const kindLabel: Record<string, string> = {
@@ -39,6 +39,7 @@ export function Header() {
   const providers = useApp((s) => s.providers);
   const setLogsOpen = useApp((s) => s.setLogsOpen);
   const setCapabilitiesOpen = useApp((s) => s.setCapabilitiesOpen);
+  const setExportOpen = useApp((s) => s.setExportOpen);
 
   const active = projects.find((p) => p.id === activeProjectId) ?? projects[0];
   const activeProvider = providers.find((p) => p.id === settings.providerId);
@@ -142,6 +143,15 @@ export function Header() {
           aria-label="Toggle theme"
         >
           {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-2"
+          onClick={() => setExportOpen(true)}
+        >
+          <FolderOutput className="h-4 w-4" />
+          <span className="hidden sm:inline">Export</span>
         </Button>
         <Button
           variant="outline"

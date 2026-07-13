@@ -133,18 +133,6 @@ export const starterSuggestions: { title: string; prompt: string; icon: string }
       "An Android hiking app with offline topo maps, GPS trail recording, elevation profiles, community trails, and on-device AI recommendations.",
     icon: "smartphone",
   },
-  {
-    title: "Rust sync CLI",
-    prompt:
-      "A fast cross-platform CLI in Rust for synchronizing local files with S3-compatible storage, with checksums, retries, and parallel transfers.",
-    icon: "terminal",
-  },
-  {
-    title: "AI support agent service",
-    prompt:
-      "An AI customer-support agent service that connects to email and chat, retrieves from a knowledge base, drafts replies, and escalates uncertain cases to humans.",
-    icon: "bot",
-  },
 ];
 
 /* ---------------- Stage detail snippets ---------------- */

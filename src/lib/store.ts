@@ -22,6 +22,7 @@ import {
   stageDetails,
   makeArtifacts,
 } from "./mock-data";
+import { orchestrator, detectTargets, executionEngine } from "./engine";
 
 interface AppState {
   // data
@@ -41,9 +42,12 @@ interface AppState {
   settingsOpen: boolean;
   logsOpen: boolean;
   capabilitiesOpen: boolean;
+  exportOpen: boolean;
   isBuilding: boolean;
   input: string;
   streaming: boolean;
+  currentWorkflowId: string | null;
+  lastCheckpointStage: string | null;
 
   // actions
   setActiveProject: (id: string) => void;
@@ -65,6 +69,9 @@ interface AppState {
   setSettingsOpen: (v: boolean) => void;
   setLogsOpen: (v: boolean) => void;
   setCapabilitiesOpen: (v: boolean) => void;
+  setExportOpen: (v: boolean) => void;
+  setLastCheckpointStage: (s: string | null) => void;
+  exportProject: (targetPath: string) => Promise<{ ok: boolean; message: string }>;
   addProject: (p: ProjectMeta) => void;
   clearChat: () => void;
 }
@@ -94,9 +101,12 @@ export const useApp = create<AppState>((set, get) => ({
   settingsOpen: false,
   logsOpen: false,
   capabilitiesOpen: false,
+  exportOpen: false,
   isBuilding: false,
   input: "",
   streaming: false,
+  currentWorkflowId: null,
+  lastCheckpointStage: null,
 
   setActiveProject: (id) =>
     set((s) => {
@@ -125,10 +135,22 @@ export const useApp = create<AppState>((set, get) => ({
 
   startBuild: (prompt) => {
     const state = get();
-    const targets = inferTargets(prompt);
-    const primaryKind = targets[0]?.kind ?? "web";
+    // Use the orchestrator's requirement reasoning (Decision Engine + Capability
+    // Detection). The engine selects a workflow, detects multi-targets, writes
+    // Requirements/Decision/Architecture memory, and submits a task DAG to the
+    // Execution Engine (parallel, dependency-scheduled, with quality gates).
+    const detected = detectTargets(prompt);
+    const targets: TargetSpec[] = detected.map((t, i) => ({
+      id: `t${i + 1}`,
+      kind: t.kind as ProjectKind,
+      label: t.label,
+      role: t.role,
+      stack: t.stack,
+    }));
+    const primaryKind = (targets[0]?.kind ?? "web") as ProjectKind;
     const primaryStack = targets[0]?.stack ?? "TypeScript";
     const name = inferName(prompt) || "New Project";
+
     const project: ProjectMeta = {
       id: `proj-${Date.now()}`,
       name,
@@ -139,6 +161,10 @@ export const useApp = create<AppState>((set, get) => ({
       prompt,
       targets,
     };
+
+    // Run the orchestrator (submits DAG to execution engine)
+    const result = orchestrator.startBuild(prompt);
+
     set((s) => ({
       projects: [project, ...s.projects],
       activeProjectId: project.id,
@@ -146,6 +172,7 @@ export const useApp = create<AppState>((set, get) => ({
       previewReady: false,
       isBuilding: true,
       previewTarget: primaryPreviewTarget(targets),
+      currentWorkflowId: result.workflow.id,
     }));
     set({
       stages: initialStages.map((st, i) => ({
@@ -160,8 +187,15 @@ export const useApp = create<AppState>((set, get) => ({
         ? `${targets.length} targets: ${targets.map((t) => t.label).join(", ")}`
         : `${primaryStack}`;
     get().addLog("info", "orchestrator", `New project: ${name} · ${targetSummary}`);
+    get().addLog("info", "workflow-engine", `Workflow: ${result.workflow.name} · ${result.tasks.length} tasks compiled`);
+    if (result.capabilities.length > 0) {
+      get().addLog("info", "decision-engine", `Capabilities detected: ${result.capabilities.join(", ")}`);
+    }
     targets.forEach((t) =>
       get().addLog("info", "selector", `Selected ${t.stack} for ${t.label}`)
+    );
+    result.decisions.slice(0, 6).forEach((d) =>
+      get().addLog("info", "decision-engine", `${d.topic} → ${d.chosen} (${Math.round(d.confidence * 100)}%)`)
     );
   },
 
@@ -225,6 +259,28 @@ export const useApp = create<AppState>((set, get) => ({
   setSettingsOpen: (v) => set({ settingsOpen: v }),
   setLogsOpen: (v) => set({ logsOpen: v }),
   setCapabilitiesOpen: (v) => set({ capabilitiesOpen: v }),
+  setExportOpen: (v) => set({ exportOpen: v }),
+  setLastCheckpointStage: (s) => set({ lastCheckpointStage: s }),
+
+  exportProject: async (targetPath) => {
+    const state = get();
+    const active = state.projects.find((p) => p.id === state.activeProjectId);
+    if (!active) return { ok: false, message: "No active project." };
+    get().addLog("info", "export-manager", `Export workflow started → ${targetPath}`);
+    // The Export Manager assembles /backend /desktop /android /web-admin /docs
+    // /artifacts + DecisionLog.json from the Artifact Registry and writes to the
+    // chosen folder. On web, prefer File System Access API; fall back to zip.
+    try {
+      const { exportSolution } = await import("./export");
+      const result = await exportSolution(active, targetPath);
+      get().addLog("success", "export-manager", result.message);
+      return result;
+    } catch (err) {
+      const msg = `Export failed: ${String(err)}`;
+      get().addLog("error", "export-manager", msg);
+      return { ok: false, message: msg };
+    }
+  },
 
   addProject: (p) => set((s) => ({ projects: [p, ...s.projects], activeProjectId: p.id })),
   clearChat: () => set({ chat: seedChat }),

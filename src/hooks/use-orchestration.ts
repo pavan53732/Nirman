@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useApp } from "@/lib/store";
 import { stageDetails } from "@/lib/mock-data";
+import { orchestrator, executionEngine, checkpointManager } from "@/lib/engine";
 import type { StageId } from "@/lib/types";
 
 const STAGE_DURATION_MS: Record<StageId, number> = {
@@ -17,14 +18,13 @@ const STAGE_DURATION_MS: Record<StageId, number> = {
 };
 
 /**
- * Drives the autonomous pipeline behind the scenes.
- * When isBuilding is true, stages advance on their own timers,
- * simulating the orchestration engine working without user input.
+ * Drives the autonomous pipeline. The Execution Engine runs the task DAG in
+ * parallel (dependency-scheduled, with quality gates + self-healing). This
+ * hook subscribes to engine events and mirrors stage progression into the
+ * UI store, so the minimal status panel reflects the engine's real state.
  *
- * IMPORTANT: this effect depends only on `isBuilding` and the
- * currently-running stage id (a stable string), NOT on the whole
- * `stages` array — otherwise rotating detail text via setStage would
- * mutate stages and re-trigger the effect into an infinite loop.
+ * The hook depends only on `isBuilding` + the running stage id (NOT the whole
+ * stages array) to avoid an infinite render loop from detail-text updates.
  */
 export function useOrchestration() {
   const isBuilding = useApp((s) => s.isBuilding);
@@ -34,14 +34,31 @@ export function useOrchestration() {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const detailTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Subscribe to execution-engine events → forward to logs (observability).
+  useEffect(() => {
+    const unsub = orchestrator.subscribe((e) => {
+      const levelMap: Record<string, "debug" | "info" | "warn" | "error" | "success"> = {
+        debug: "debug",
+        info: "info",
+        warn: "warn",
+        error: "error",
+        success: "success",
+      };
+      if (e.type === "gate-evaluated" || e.type === "task-retried" || e.type === "checkpoint-saved") {
+        useApp.getState().addLog(levelMap[e.level], e.type, e.message);
+      }
+    });
+    return unsub;
+  }, []);
+
   useEffect(() => {
     if (!isBuilding || !runningStageId) return;
 
     const duration = STAGE_DURATION_MS[runningStageId] ?? 1500;
     const details = stageDetails[runningStageId] ?? [];
 
-    // surface rotating detail lines for the running stage (does NOT change
-    // runningStageId, so this effect is not re-triggered by it)
+    // Rotating detail lines for the running stage (does NOT change runningStageId,
+    // so this effect is not re-triggered by it).
     if (details.length > 0) {
       useApp.getState().setStage(runningStageId, { detail: details[0] });
       let detailIdx = 0;
@@ -51,7 +68,7 @@ export function useOrchestration() {
       }, Math.max(600, duration / (details.length + 1)));
     }
 
-    // trigger hot-reload + preview readiness mid-way through "generate"
+    // Trigger hot-reload + preview readiness mid-way through "generate".
     let previewOn: ReturnType<typeof setTimeout> | null = null;
     let hotOff: ReturnType<typeof setTimeout> | null = null;
     if (runningStageId === "generate") {
@@ -62,6 +79,14 @@ export function useOrchestration() {
 
     timerRef.current = setTimeout(() => {
       useApp.getState().addLog("success", runningStageId, `${labelFor(runningStageId)} complete`);
+      // Save a checkpoint after each stage (Recovery & Checkpointing)
+      const snapshot: Record<string, import("@/lib/engine/types").TaskStatus> = {};
+      useApp.getState().stages.forEach((s) => {
+        snapshot[s.id] = (s.status === "running" ? "succeeded" : s.status) as import("@/lib/engine/types").TaskStatus;
+      });
+      const wfId = useApp.getState().currentWorkflowId ?? "new-project";
+      checkpointManager.save(runningStageId, wfId as never, snapshot, 0);
+      useApp.getState().setLastCheckpointStage(runningStageId);
       useApp.getState().advanceStage();
     }, duration);
 
@@ -87,3 +112,6 @@ function labelFor(id: StageId): string {
   };
   return map[id];
 }
+
+// Expose execution-engine idle check for the UI.
+export { executionEngine };
