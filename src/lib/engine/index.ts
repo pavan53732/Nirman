@@ -15,11 +15,21 @@ import { executionEngine, checkpointManager, makeTask } from "./execution-engine
 import { workflowEngine } from "./workflow-engine";
 import { projectMemory, contextBuilder } from "./memories";
 import { artifactRegistry } from "./artifact-registry";
-import { decisionEngine, detectCapabilities } from "./decision-engine";
+import { decisionEngine, detectCapabilities, detectNonFunctionals } from "./decision-engine";
 import { detectTargets } from "./orchestrator";
 import { selfHealController, evaluateGate, GATE_META, DEFAULT_SELF_HEAL_POLICY } from "./self-healing";
 import { observability } from "./observability";
 import { providerManager, modelRouter, costOptimizer, tokenBudgetManager } from "./provider-abstraction";
+import {
+  generateForTarget,
+  generateWinUI3,
+  generateAndroidCompose,
+  generateNextjs,
+  generateTauri,
+  generateFlutter,
+  generateRustCli,
+  type GenerationResult,
+} from "./generators";
 
 // Bootstrap registries (idempotent)
 registries.skills.registerAll(skills);
@@ -44,6 +54,7 @@ export {
   artifactRegistry,
   decisionEngine,
   detectCapabilities,
+  detectNonFunctionals,
   detectTargets,
   selfHealController,
   evaluateGate,
@@ -54,6 +65,25 @@ export {
   modelRouter,
   costOptimizer,
   tokenBudgetManager,
+  generateForTarget,
+  generateWinUI3,
+  generateAndroidCompose,
+  generateNextjs,
+  generateTauri,
+  generateFlutter,
+  generateRustCli,
 };
+export type { GenerationResult } from "./generators";
+export {
+  idbSaveCheckpoint,
+  idbLoadCheckpoints,
+  idbLoadLatestCheckpoint,
+  idbClearCheckpoints,
+  idbSaveMemory,
+  idbLoadLatestMemory,
+  isIndexedDBAvailable,
+  type PersistedCheckpoint,
+  type PersistedMemory,
+} from "./idb";
 
 export * from "./types";

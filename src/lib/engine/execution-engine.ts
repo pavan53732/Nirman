@@ -187,6 +187,9 @@ export class ExecutionEngine {
 }
 
 /* ---------------- Checkpoint Manager ---------------- */
+// Persists checkpoints to IndexedDB (async, large-capacity) so resume-after-
+// crash works for long multi-target builds. Keeps an in-memory copy for
+// synchronous access; IndexedDB is the durable store.
 export class CheckpointManager {
   private checkpoints: import("./types").Checkpoint[] = [];
 
@@ -201,6 +204,19 @@ export class CheckpointManager {
       memoryVersion,
     };
     this.checkpoints.push(cp);
+    // Persist to IndexedDB asynchronously (fire-and-forget; IDB is the durable
+    // store that survives crashes/reloads, unlike the in-memory copy).
+    void import("./idb").then(({ idbSaveCheckpoint }) =>
+      idbSaveCheckpoint({
+        id: cp.id,
+        workflowId: cp.workflowId,
+        stageId: cp.stageId,
+        taskId: cp.taskId,
+        ts: cp.ts,
+        stageStatusSnapshot: cp.stageStatusSnapshot as Record<string, string>,
+        memoryVersion: cp.memoryVersion,
+      })
+    );
     return cp;
   }
 
@@ -231,8 +247,49 @@ export class CheckpointManager {
     return this.checkpoints[0];
   }
 
+  /**
+   * Restore from IndexedDB after a crash/reload. Loads the latest persisted
+   * checkpoint for the given workflow (or any workflow if omitted) and
+   * repopulates the in-memory list. Returns the stage to resume from, or null
+   * if nothing was persisted.
+   */
+  async restoreFromIDB(workflowId?: string): Promise<{ stageId: string; snapshot: Record<string, TaskStatus> } | null> {
+    try {
+      const { idbLoadCheckpoints } = await import("./idb");
+      const persisted = await idbLoadCheckpoints(workflowId);
+      if (persisted.length === 0) return null;
+      // Repopulate in-memory checkpoints
+      this.checkpoints = persisted.map((p) => ({
+        id: p.id,
+        workflowId: p.workflowId as WorkflowId,
+        stageId: p.stageId,
+        taskId: p.taskId,
+        ts: p.ts,
+        stageStatusSnapshot: p.stageStatusSnapshot as Record<string, TaskStatus>,
+        memoryVersion: p.memoryVersion,
+      }));
+      const latest = this.checkpoints[this.checkpoints.length - 1];
+      return { stageId: latest.stageId, snapshot: latest.stageStatusSnapshot };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Check whether any checkpoints are persisted in IndexedDB. */
+  async hasPersistedState(workflowId?: string): Promise<boolean> {
+    try {
+      const { idbLoadCheckpoints } = await import("./idb");
+      const persisted = await idbLoadCheckpoints(workflowId);
+      return persisted.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   clear(): void {
     this.checkpoints = [];
+    // Also clear persisted state so a fresh build doesn't resume stale data.
+    void import("./idb").then(({ idbClearCheckpoints }) => idbClearCheckpoints());
   }
 }
 

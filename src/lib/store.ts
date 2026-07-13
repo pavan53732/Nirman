@@ -22,7 +22,7 @@ import {
   stageDetails,
   makeArtifacts,
 } from "./mock-data";
-import { orchestrator, detectTargets, executionEngine } from "./engine";
+import { orchestrator, detectTargets, detectNonFunctionals, executionEngine, checkpointManager } from "./engine";
 
 interface AppState {
   // data
@@ -72,6 +72,7 @@ interface AppState {
   setExportOpen: (v: boolean) => void;
   setLastCheckpointStage: (s: string | null) => void;
   exportProject: (targetPath: string) => Promise<{ ok: boolean; message: string }>;
+  resumeFromCrash: () => Promise<boolean>;
   addProject: (p: ProjectMeta) => void;
   clearChat: () => void;
 }
@@ -191,12 +192,19 @@ export const useApp = create<AppState>((set, get) => ({
     if (result.capabilities.length > 0) {
       get().addLog("info", "decision-engine", `Capabilities detected: ${result.capabilities.join(", ")}`);
     }
+    const nfs = detectNonFunctionals(prompt);
+    if (nfs.length > 0) {
+      get().addLog("info", "decision-engine", `Non-functionals: ${nfs.join(", ")}`);
+    }
     targets.forEach((t) =>
       get().addLog("info", "selector", `Selected ${t.stack} for ${t.label}`)
     );
     result.decisions.slice(0, 6).forEach((d) =>
       get().addLog("info", "decision-engine", `${d.topic} → ${d.chosen} (${Math.round(d.confidence * 100)}%)`)
     );
+    if (result.generatedFiles > 0) {
+      get().addLog("success", "desktop-generator", `Generated ${result.generatedFiles} source files across ${targets.length} target(s)`);
+    }
   },
 
   setStage: (id, patch) =>
@@ -284,6 +292,27 @@ export const useApp = create<AppState>((set, get) => ({
 
   addProject: (p) => set((s) => ({ projects: [p, ...s.projects], activeProjectId: p.id })),
   clearChat: () => set({ chat: seedChat }),
+
+  resumeFromCrash: async () => {
+    // Restore the latest checkpoint from IndexedDB (survives crashes/reloads,
+    // unlike the in-memory copy). If found, mark stages up to the checkpoint
+    // as done and resume from the next stage.
+    const r = await checkpointManager.restoreFromIDB();
+    if (!r) {
+      get().addLog("info", "orchestrator", "No persisted checkpoint found in IndexedDB.");
+      return false;
+    }
+    const stageIds = stageOrder;
+    const resumeIdx = stageIds.indexOf(r.stageId as StageId);
+    const stages = initialStages.map((st, i) => {
+      if (i < resumeIdx) return { ...st, status: "done" as const, durationMs: 1000, detail: undefined };
+      if (i === resumeIdx) return { ...st, status: "running" as const, detail: undefined, durationMs: undefined };
+      return { ...st, status: "pending" as const, detail: undefined, durationMs: undefined };
+    });
+    set({ stages, isBuilding: true, lastCheckpointStage: r.stageId });
+    get().addLog("success", "orchestrator", `Resumed from IndexedDB checkpoint at "${r.stageId}" — continuing build.`);
+    return true;
+  },
 }));
 
 /* ---------------- Requirement reasoning ---------------- */

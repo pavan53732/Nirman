@@ -24,22 +24,25 @@ import { executionEngine, checkpointManager, makeTask } from "./execution-engine
 import { workflowEngine } from "./workflow-engine";
 import { projectMemory, contextBuilder } from "./memories";
 import { artifactRegistry } from "./artifact-registry";
-import { decisionEngine, detectCapabilities, type DetectedTargets } from "./decision-engine";
+import { decisionEngine, detectCapabilities, detectNonFunctionals, type DetectedTargets } from "./decision-engine";
 import { observability } from "./observability";
 import { selfHealController } from "./self-healing";
 import { registries } from "./registries";
 import { tokenBudgetManager } from "./provider-abstraction";
+import { generateForTarget } from "./generators";
 
 export interface OrchestrationResult {
   workflow: Workflow;
   targets: DetectedTargets[];
   decisions: DecisionRecord[];
   capabilities: Capability[];
+  generatedFiles: number;
 }
 
 /** Detect generation targets (multi-target) from a prompt. */
 export function detectTargets(prompt: string): DetectedTargets[] {
   const caps = detectCapabilities(prompt);
+  const nfs = detectNonFunctionals(prompt);
   const p = " " + prompt.toLowerCase() + " ";
   const out: DetectedTargets[] = [];
   const wants = (re: RegExp) => re.test(p);
@@ -55,38 +58,38 @@ export function detectTargets(prompt: string): DetectedTargets[] {
 
   if (wants(/\b(windows|desktop|winui|wpf|winforms|win32|\.net\s*(desktop|app))\b/)) {
     const kind = "windows" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps);
-    out.push({ kind, label: multi ? "Desktop App" : "App", role: multi ? "Primary desktop workspace" : "Windows desktop application", stack, capabilities: caps, policies: [decisionEngine.decide("windows native rich controls", prompt)] });
+    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
+    out.push({ kind, label: multi ? "Desktop App" : "App", role: multi ? "Primary desktop workspace" : "Windows desktop application", stack, capabilities: caps, policies: [decision] });
   }
   if (wants(/\b(android|mobile( app)?|kotlin|flutter|companion app|phone app)\b/)) {
     const kind = "android" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps);
-    out.push({ kind, label: multi ? "Android Companion" : "App", role: multi ? "Mobile companion app" : "Android application", stack, capabilities: caps, policies: [decisionEngine.decide("android native perf", prompt)] });
+    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
+    out.push({ kind, label: multi ? "Android Companion" : "App", role: multi ? "Mobile companion app" : "Android application", stack, capabilities: caps, policies: [decision] });
   }
   if (wants(/\b(web( site| app| admin| portal)?|website|landing|marketing site|saas|portal|browser)\b/)) {
     const kind = "web" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps);
-    out.push({ kind, label: multi ? "Web Portal" : "App", role: multi ? "Web admin portal" : "Web application", stack, capabilities: caps, policies: [decisionEngine.decide("web marketing/landing", prompt)] });
+    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
+    out.push({ kind, label: multi ? "Web Portal" : "App", role: multi ? "Web admin portal" : "Web application", stack, capabilities: caps, policies: [decision] });
   }
   if (wants(/\b(api|rest( api)?|graphql|backend service|microservice)\b/)) {
     const kind = "api" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps);
-    out.push({ kind, label: "API Service", role: "Backend API and data layer", stack, capabilities: caps, policies: [decisionEngine.decide("ai knowledge base", prompt)] });
+    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
+    out.push({ kind, label: "API Service", role: "Backend API and data layer", stack, capabilities: caps, policies: [decision] });
   }
   if (wants(/\b(cli|command.line|terminal tool|brew install|cargo install)\b/)) {
     const kind = "cli" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps);
-    out.push({ kind, label: "CLI Tool", role: "Command-line utility", stack, capabilities: caps, policies: [decisionEngine.decide("cli performance/cross-platform", prompt)] });
+    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
+    out.push({ kind, label: "CLI Tool", role: "Command-line utility", stack, capabilities: caps, policies: [decision] });
   }
   if (wants(/\b(ai agent|autonomous agent|assistant service|chatbot|support agent)\b/)) {
-    out.push({ kind: "api" as PlatformKind, label: "AI Agent", role: "Autonomous agent service", stack: "Python + LangGraph", capabilities: caps, policies: [decisionEngine.decide("ai knowledge base", prompt)] });
+    out.push({ kind: "api" as PlatformKind, label: "AI Agent", role: "Autonomous agent service", stack: "Python + LangGraph", capabilities: caps, policies: [decisionEngine.pickStack("api", prompt, caps, nfs).decision] });
   }
   if (wants(/\b(library|sdk|npm package|crate)\b/)) {
     out.push({ kind: "library" as PlatformKind, label: "Library", role: "Reusable library / SDK", stack: /\b(rust|crate)\b/.test(p) ? "Rust crate" : "TypeScript library", capabilities: caps, policies: [] });
   }
   if (out.length === 0) {
     const kind = "web" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps);
+    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
     out.push({ kind, label: "Web App", role: "Web application", stack, capabilities: caps, policies: [decision] });
   }
   return out;
@@ -146,6 +149,31 @@ export class Orchestrator {
       level: "info",
     });
 
+    // ---- Real generation: invoke the generator for each detected target ----
+    // The Desktop Generator (Anvil) produces WinUI 3 / Tauri scaffolding; the
+    // Android Generator (Droid) produces Kotlin+Compose / Flutter; the Web
+    // Generator (Forge) produces Next.js. Files are versioned into the Artifact
+    // Registry and emitted as artifact-produced events for observability.
+    const generationResults = targets.map((t, i) => {
+      const result = generateForTarget(t.kind, t.stack, promptToName(prompt) || `App${i + 1}`, `t${i + 1}`);
+      observability.recordEvent({
+        id: `ev-${Date.now()}-gen-${i}`,
+        ts: Date.now(),
+        type: "artifact-produced",
+        stageId: "generate",
+        message: `${t.label}: generated ${result.files.length} files (${result.stack})`,
+        level: "success",
+      });
+      projectMemory.write(
+        "code",
+        `${t.label} source`,
+        result.files.map((f) => `${f.path} (${(f.content.length / 1024).toFixed(1)} KB)`).join("\n"),
+        result.producedBy
+      );
+      return result;
+    });
+    const totalFiles = generationResults.reduce((n, g) => n + g.files.length, 0);
+
     // Compile DAG
     const tasks = workflowEngine.compile(workflow, workflow.stages.map((s) => s.id as StageId));
 
@@ -160,12 +188,19 @@ export class Orchestrator {
       });
     }
     tokenBudgetManager.charge("planner", workflow.id, ctx.tokenEstimate);
-    observability.chargeTokens("planner", ctx.tokenEstimate);
+    observability.chargeTokens("planner", ctx.tokenEstimate, workflow.id);
+    // Charge the generator agents for producing source files (token estimate
+    // based on generated file sizes — ~4 chars per token).
+    for (const g of generationResults) {
+      const genTokens = g.files.reduce((n, f) => n + Math.ceil(f.content.length / 4), 0);
+      observability.chargeTokens(g.producedBy, genTokens, workflow.id);
+      tokenBudgetManager.charge(g.producedBy, workflow.id, genTokens);
+    }
 
     // Submit to execution engine (parallel, dependency-scheduled)
     executionEngine.submitAll(tasks);
 
-    return { workflow, targets, decisions, capabilities, tasks };
+    return { workflow, targets, decisions, capabilities, tasks, generatedFiles: totalFiles };
   }
 
   /** Checkpoint after a stage completes (for recovery). */
@@ -208,3 +243,34 @@ export class Orchestrator {
 }
 
 export const orchestrator = new Orchestrator();
+
+/** Derive a clean project name from the prompt (shared with the store). */
+function promptToName(prompt: string): string {
+  let trimmed = prompt.trim().toLowerCase();
+  let prev = "";
+  while (prev !== trimmed) {
+    prev = trimmed;
+    trimmed = trimmed.replace(
+      /^(build|build me|create|make|generate|develop|i want|i need|please|a|an|the|me|some)\s+/i,
+      ""
+    );
+  }
+  const stopwords = new Set([
+    "in", "that", "with", "for", "to", "and", "of", "on", "using", "via",
+    "which", "from", "into", "where", "when", "app", "application", "as",
+    "companion", "portal", "admin", "me",
+  ]);
+  const acronyms = new Set(["cli", "ai", "api", "sdk", "saas", "ui", "ux", "ios", "ml", "crm", "cms", "erp", "hrm"]);
+  const words: string[] = [];
+  for (const w of trimmed.split(/\s+/).filter(Boolean)) {
+    if (stopwords.has(w)) break;
+    words.push(w);
+    if (words.length >= 3) break;
+  }
+  if (words.length === 0) return "App";
+  return words
+    .map((w) => (acronyms.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ")
+    .replace(/[^a-zA-Z0-9 ]/g, "")
+    .trim();
+}

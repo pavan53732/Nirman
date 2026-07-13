@@ -114,17 +114,98 @@ export const workflows: Workflow[] = [
 ];
 
 // Decision policies — reusable rules used by the Decision Engine.
-// Each logs the chosen option and alternatives rejected to Decision Memory.
+// Each has structured match criteria { platform, capabilities, nonFunctionals }
+// used for scoring, plus a human-readable `when` summary. The engine scores
+// every policy against the request's actual platform + capabilities +
+// non-functionals and picks the highest-scoring one, logging alternatives
+// rejected to Decision Memory.
 export const decisionPolicies: DecisionPolicy[] = [
-  { id: "db-offline-single", when: "offline + single user", choose: "SQLite (SQLCipher)", rationale: "Offline-first desktop with a single local user needs an embedded, encrypted store.", confidence: 0.95 },
-  { id: "db-enterprise-multi-tenant", when: "enterprise + multi-tenant", choose: "PostgreSQL + RLS", rationale: "Multi-tenant SaaS benefits from row-level security and a robust server DB.", confidence: 0.92 },
-  { id: "db-embedded-low-memory", when: "embedded + low memory", choose: "LiteDB", rationale: "Embedded targets with tight memory use a lightweight document store.", confidence: 0.88 },
-  { id: "ui-windows-native", when: "windows + native + rich controls", choose: "WinUI 3 + .NET 8", rationale: "Native Windows desktops with rich controls get the best UX from WinUI 3.", confidence: 0.9 },
-  { id: "ui-windows-cross-platform", when: "windows + cross-platform", choose: "Tauri or Avalonia", rationale: "Cross-platform desktop needs a non-WinUI stack to ship on other OSes.", confidence: 0.85 },
-  { id: "ui-android-native", when: "android + native perf", choose: "Kotlin + Jetpack Compose", rationale: "Native Android performance and platform integration favor Compose.", confidence: 0.9 },
-  { id: "ui-android-cross-platform", when: "android + cross-platform", choose: "Flutter", rationale: "Cross-platform mobile with one codebase favors Flutter.", confidence: 0.84 },
-  { id: "web-marketing", when: "web + marketing/landing", choose: "Next.js + Tailwind", rationale: "Marketing sites need SEO, speed, and responsive design — Next.js excels.", confidence: 0.93 },
-  { id: "realtime-web", when: "web + realtime", choose: "WebSockets", rationale: "Live dashboards need bidirectional low-latency channels.", confidence: 0.9 },
-  { id: "cli-rust", when: "cli + performance/cross-platform", choose: "Rust + clap", rationale: "Performance-critical cross-platform CLIs favor Rust.", confidence: 0.88 },
-  { id: "ai-rag-stack", when: "ai + knowledge base", choose: "Embeddings + vector DB", rationale: "Knowledge-grounded AI needs embeddings and a vector store for retrieval.", confidence: 0.9 },
+  {
+    id: "db-offline-single",
+    when: "offline-first single-user desktop",
+    match: { nonFunctionals: ["offline-first"] },
+    choose: "SQLite (SQLCipher)",
+    rationale: "Offline-first apps with a single local user need an embedded, encrypted store.",
+    confidence: 0.95,
+  },
+  {
+    id: "db-enterprise-multi-tenant",
+    when: "enterprise multi-tenant SaaS",
+    match: { nonFunctionals: ["enterprise", "multi-tenant"] },
+    choose: "PostgreSQL + RLS",
+    rationale: "Multi-tenant SaaS benefits from row-level security and a robust server DB.",
+    confidence: 0.92,
+  },
+  {
+    id: "db-embedded-low-memory",
+    when: "embedded low-memory target",
+    match: { nonFunctionals: ["embedded", "low-memory"] },
+    choose: "LiteDB",
+    rationale: "Embedded targets with tight memory use a lightweight document store.",
+    confidence: 0.88,
+  },
+  {
+    id: "ui-windows-native",
+    when: "windows native rich-controls",
+    match: { platform: "windows", nonFunctionals: ["native", "rich-controls"] },
+    choose: "WinUI 3 + .NET 8",
+    rationale: "Native Windows desktops with rich controls get the best UX from WinUI 3.",
+    confidence: 0.9,
+  },
+  {
+    id: "ui-windows-cross-platform",
+    when: "windows cross-platform",
+    match: { platform: "windows", nonFunctionals: ["cross-platform"] },
+    choose: "Tauri + Rust",
+    rationale: "Cross-platform desktop needs a non-WinUI stack to ship on other OSes.",
+    confidence: 0.85,
+  },
+  {
+    id: "ui-android-native",
+    when: "android native performance",
+    match: { platform: "android", nonFunctionals: ["native", "performance"] },
+    choose: "Kotlin + Jetpack Compose",
+    rationale: "Native Android performance and platform integration favor Compose.",
+    confidence: 0.9,
+  },
+  {
+    id: "ui-android-cross-platform",
+    when: "android cross-platform",
+    match: { platform: "android", nonFunctionals: ["cross-platform"] },
+    choose: "Flutter",
+    rationale: "Cross-platform mobile with one codebase favors Flutter.",
+    confidence: 0.84,
+  },
+  {
+    id: "web-marketing",
+    when: "web marketing",
+    match: { platform: "web", nonFunctionals: ["marketing"] },
+    choose: "Next.js + Tailwind",
+    rationale: "Marketing sites need SEO, speed, and responsive design — Next.js excels.",
+    confidence: 0.93,
+  },
+  {
+    id: "web-realtime",
+    when: "web realtime",
+    match: { platform: "web", nonFunctionals: ["realtime"] },
+    choose: "Next.js + WebSockets",
+    rationale: "Live dashboards need bidirectional low-latency channels over a Next.js frontend.",
+    confidence: 0.9,
+  },
+  {
+    id: "cli-rust",
+    when: "cli performance cross-platform",
+    match: { platform: "cli", nonFunctionals: ["performance", "cross-platform"] },
+    choose: "Rust + clap",
+    rationale: "Performance-critical cross-platform CLIs favor Rust.",
+    confidence: 0.88,
+  },
+  {
+    id: "ai-rag-stack",
+    when: "ai knowledge base",
+    match: { capabilities: ["offline-sync"], nonFunctionals: [] },
+    choose: "Embeddings + vector DB",
+    rationale: "Knowledge-grounded AI needs embeddings and a vector store for retrieval.",
+    confidence: 0.9,
+  },
 ];

@@ -382,9 +382,30 @@ export interface ArtifactRecord {
 
 /* ---------------- Decision Engine ---------------- */
 
+/** Non-functional requirements inferred from the prompt. */
+export type NonFunctional =
+  | "offline-first"
+  | "cross-platform"
+  | "enterprise"
+  | "multi-tenant"
+  | "embedded"
+  | "low-memory"
+  | "performance"
+  | "realtime"
+  | "marketing"
+  | "native"
+  | "rich-controls";
+
 export interface DecisionPolicy {
   id: string;
+  /** Human-readable summary of the match condition. */
   when: string;
+  /** Structured match criteria used for scoring. */
+  match: {
+    platform?: PlatformKind;
+    capabilities?: Capability[];
+    nonFunctionals?: NonFunctional[];
+  };
   choose: string;
   rationale: string;
   confidence: number;

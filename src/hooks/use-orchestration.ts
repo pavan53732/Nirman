@@ -44,11 +44,22 @@ export function useOrchestration() {
         error: "error",
         success: "success",
       };
-      if (e.type === "gate-evaluated" || e.type === "task-retried" || e.type === "checkpoint-saved") {
+      if (e.type === "gate-evaluated" || e.type === "task-retried" || e.type === "checkpoint-saved" || e.type === "artifact-produced") {
         useApp.getState().addLog(levelMap[e.level], e.type, e.message);
       }
     });
     return unsub;
+  }, []);
+
+  // On mount, check IndexedDB for a persisted checkpoint (crash recovery).
+  // If found and we're not already building, surface a resume hint in the logs.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    checkpointManager.hasPersistedState().then((has) => {
+      if (has && !useApp.getState().isBuilding) {
+        useApp.getState().addLog("info", "orchestrator", "Crash recovery: a persisted checkpoint was found in IndexedDB. Open Logs → Resume to continue the interrupted build.");
+      }
+    });
   }, []);
 
   useEffect(() => {
