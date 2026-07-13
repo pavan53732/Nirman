@@ -8,6 +8,7 @@ export const skills: Skill[] = [
   { id: "req-ambiguity", name: "Ambiguity Detection", category: "Requirements", agent: "requirements-analyst", description: "Flag underspecified or contradictory requirements." },
   { id: "req-decomposition", name: "Feature Decomposition", category: "Requirements", agent: "planner", description: "Break features into buildable units of work." },
   { id: "req-stories", name: "User Story Generation", category: "Requirements", agent: "business-analyst", description: "Produce acceptance-criteria-driven user stories." },
+  { id: "req-ambiguity-detection", name: "Ambiguity Detection", category: "Requirements", agent: "planner", description: "Score requirement clarity; if >0.75 ambiguous, emit a human-question and pause instead of inventing requirements." },
   // Architecture
   { id: "arch-system", name: "System Design", category: "Architecture", agent: "solution-architect", description: "Design end-to-end system structure and topology." },
   { id: "arch-modules", name: "Module Decomposition", category: "Architecture", agent: "software-architect", description: "Define module boundaries and responsibilities." },

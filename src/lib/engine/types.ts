@@ -29,6 +29,9 @@ export type Capability =
 
 /* ---------------- Skill Registry (AI reasoning) ---------------- */
 
+/** Identifier for a registered skill (the Skill.id). */
+export type SkillId = string;
+
 export interface Skill extends RegistryEntry {
   category: string;
   description: string;
@@ -147,6 +150,12 @@ export interface Agent extends RegistryEntry {
   alwaysActive?: boolean;
   /** For dynamic agents: the capability/signal that spawns this agent. */
   spawnedBy?: Capability | "on-demand";
+  /**
+   * Skills this agent consumes (derived at bootstrap from Skill.agent).
+   * The inverse of Skill.agent: both directions exist so consumers can
+   * traverse agent→skills and skill→agent.
+   */
+  consumes?: SkillId[];
 }
 
 /* ---------------- Platform Adapter Registry ---------------- */

@@ -151,6 +151,10 @@ export const useApp = create<AppState>((set, get) => ({
     const primaryKind = (targets[0]?.kind ?? "web") as ProjectKind;
     const primaryStack = targets[0]?.stack ?? "TypeScript";
     const name = inferName(prompt) || "New Project";
+    const targetSummary =
+      targets.length > 1
+        ? `${targets.length} targets: ${targets.map((t) => t.label).join(", ")}`
+        : `${primaryStack}`;
 
     const project: ProjectMeta = {
       id: `proj-${Date.now()}`,
@@ -165,6 +169,31 @@ export const useApp = create<AppState>((set, get) => ({
 
     // Run the orchestrator (submits DAG to execution engine)
     const result = orchestrator.startBuild(prompt);
+
+    // Autonomy gate: if the ambiguity detector raised a question (score >
+    // 0.75), surface it in chat and do NOT start the pipeline. The engine
+    // waits for clarification rather than inventing requirements.
+    if (result.pendingQuestion) {
+      set((s) => ({
+        projects: [project, ...s.projects],
+        activeProjectId: project.id,
+        artifacts: makeArtifacts(name, primaryKind, targets),
+        previewReady: false,
+        isBuilding: false,
+        previewTarget: primaryPreviewTarget(targets),
+        currentWorkflowId: result.workflow.id,
+      }));
+      get().addLog("info", "orchestrator", `New project: ${name} · ${targetSummary}`);
+      get().addLog("warn", "ambiguity-detector", `Ambiguity score ${result.ambiguityScore.toFixed(2)} > 0.75 — asking user before proceeding.`);
+      // Surface the question as a system message in chat
+      get().addMessage({
+        id: `sys-q-${Date.now()}`,
+        role: "system",
+        content: `Clarification needed: ${result.pendingQuestion}`,
+        timestamp: Date.now(),
+      });
+      return;
+    }
 
     set((s) => ({
       projects: [project, ...s.projects],
@@ -183,12 +212,9 @@ export const useApp = create<AppState>((set, get) => ({
         durationMs: undefined,
       })),
     });
-    const targetSummary =
-      targets.length > 1
-        ? `${targets.length} targets: ${targets.map((t) => t.label).join(", ")}`
-        : `${primaryStack}`;
     get().addLog("info", "orchestrator", `New project: ${name} · ${targetSummary}`);
     get().addLog("info", "workflow-engine", `Workflow: ${result.workflow.name} · ${result.tasks.length} tasks compiled`);
+    get().addLog("info", "ambiguity-detector", `Ambiguity score ${result.ambiguityScore.toFixed(2)} (threshold 0.75) — proceeding autonomously`);
     if (result.capabilities.length > 0) {
       get().addLog("info", "decision-engine", `Capabilities detected: ${result.capabilities.join(", ")}`);
     }

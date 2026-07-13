@@ -39,6 +39,14 @@ registries.platformAdapters.registerAll(platformAdapters);
 registries.previewProviders.registerAll(previewProviders);
 registries.providers.registerAll(providers);
 
+// Derive Agent.consumes (inverse of Skill.agent): each agent consumes the
+// skills whose `agent` field matches its role. Both directions now exist.
+for (const agent of registries.agents.all()) {
+  agent.consumes = registries.skills
+    .filter((s) => s.agent === agent.role)
+    .map((s) => s.id);
+}
+
 // Bootstrap orchestrator (wire event bus to observability)
 orchestrator.bootstrap();
 
@@ -74,6 +82,13 @@ export {
   generateRustCli,
 };
 export type { GenerationResult } from "./generators";
+export {
+  detectAmbiguity,
+  askQuestionIfNeeded,
+  AMBIGUITY_THRESHOLD,
+  type AmbiguityResult,
+  type AmbiguityCheck,
+} from "./skills/ambiguity-detector";
 export {
   idbSaveCheckpoint,
   idbLoadCheckpoints,

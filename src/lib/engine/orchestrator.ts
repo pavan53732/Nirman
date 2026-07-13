@@ -30,6 +30,7 @@ import { selfHealController } from "./self-healing";
 import { registries } from "./registries";
 import { tokenBudgetManager } from "./provider-abstraction";
 import { generateForTarget } from "./generators";
+import { askQuestionIfNeeded, detectAmbiguity, AMBIGUITY_THRESHOLD } from "./skills/ambiguity-detector";
 
 export interface OrchestrationResult {
   workflow: Workflow;
@@ -37,6 +38,10 @@ export interface OrchestrationResult {
   decisions: DecisionRecord[];
   capabilities: Capability[];
   generatedFiles: number;
+  /** Ambiguity score 0..1 from the autonomy gate. */
+  ambiguityScore: number;
+  /** Question to ask the user if ambiguity > threshold (null = proceed). */
+  pendingQuestion: string | null;
 }
 
 /** Detect generation targets (multi-target) from a prompt. */
@@ -128,6 +133,21 @@ export class Orchestrator {
       level: "info",
     });
 
+    // Autonomy gate: Ambiguity Detection. If the requirement is too ambiguous
+    // (score > AMBIGUITY_THRESHOLD), emit a human-question and pause the
+    // workflow instead of inventing business requirements. The engine asks
+    // ONLY when information is missing, conflicting, or an external resource
+    // is needed without credentials.
+    const ambiguity = detectAmbiguity(prompt);
+    observability.recordEvent({
+      id: `ev-${Date.now()}-amb`,
+      ts: Date.now(),
+      type: "capability-detected",
+      message: `Ambiguity score ${ambiguity.score.toFixed(2)} (threshold ${AMBIGUITY_THRESHOLD})${ambiguity.shouldAsk ? " → asking user" : " → proceeding autonomously"}`,
+      level: ambiguity.shouldAsk ? "warn" : "info",
+    });
+    const pendingQuestion = askQuestionIfNeeded(prompt);
+
     // Detect multi-targets + decisions
     const targets = detectTargets(prompt);
     const decisions = targets.flatMap((t) => t.policies);
@@ -197,10 +217,27 @@ export class Orchestrator {
       tokenBudgetManager.charge(g.producedBy, workflow.id, genTokens);
     }
 
-    // Submit to execution engine (parallel, dependency-scheduled)
+    // Submit to execution engine (parallel, dependency-scheduled). If the
+    // ambiguity gate raised a question, askQuestionIfNeeded already cancelled
+    // running tasks; we still return the plan so the UI can surface the question.
     executionEngine.submitAll(tasks);
+    if (pendingQuestion) {
+      // Pause: cancel anything that just started so the engine waits for the
+      // user's clarification before resuming.
+      executionEngine.cancelAll();
+      projectMemory.write("requirements", "Pending Question", pendingQuestion, "ambiguity-detector");
+    }
 
-    return { workflow, targets, decisions, capabilities, tasks, generatedFiles: totalFiles };
+    return {
+      workflow,
+      targets,
+      decisions,
+      capabilities,
+      tasks,
+      generatedFiles: totalFiles,
+      ambiguityScore: ambiguity.score,
+      pendingQuestion,
+    };
   }
 
   /** Checkpoint after a stage completes (for recovery). */

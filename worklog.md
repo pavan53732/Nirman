@@ -136,3 +136,18 @@ Work Log:
 
 Stage Summary:
 - All 4 improvements verified end-to-end with Agent Browser: (1) Decision Engine selects WinUI 3/Kotlin/Next.js with confidence scores + non-functional detection instead of "default stack"; (2) real WinUI 3/Tauri/Next.js/Flutter/Rust-CLI generators produce actual source files (14 files for the CRM, exported as a 13-file zip); (3) checkpoints persist to IndexedDB and resume works after a simulated crash/reload; (4) cost/token timeline shows 2,501 tokens / $0.0300 with a sparkline + per-workflow + per-agent breakdown. Lint clean, no console/server errors, mobile-responsive at 390px. External UX unchanged.
+
+---
+Task ID: 8
+Agent: Z.ai Code (main)
+Task: Fix the 4 fails from the verification report without touching passing code.
+
+Work Log:
+- FAIL 1 (registry file names): Created 5 alias files in src/lib/engine/ that re-export from the consolidated registries.ts — skill-registry.ts, tool-registry.ts, agent-registry.ts, platform-adapters.ts, preview-providers.ts. Each exports the relevant registry + type. No imports broken; data/*.ts untouched.
+- FAIL 2 (Agent.consumes): Added `consumes?: SkillId[]` to the Agent interface in types.ts (with a new `SkillId = string` type alias). At bootstrap in index.ts, derive each agent's consumes from the inverse of Skill.agent: `agent.consumes = skills.filter(s => s.agent === agent.role).map(s => s.id)`. Both directions (skill→agent and agent→skills) now exist.
+- FAIL 3 (tauri.conf.json): Added a `src-tauri/tauri.conf.json` file template to generateTauri() in generators.ts with `bundle.targets: ["nsis","msi"]`, `webviewInstallMode: { type: "downloadBootstrapper" }` (system WebView2 → 3-8 MB installers vs 100MB+ bundled Chromium), window config (1200×800), and build commands. Documented the size rationale in comments + README.
+- FAIL 4 (autonomy ambiguity gate): Created src/lib/engine/skills/ambiguity-detector.ts with `AMBIGUITY_THRESHOLD = 0.75` (grep-able constant), `detectAmbiguity(requirements)` scoring 4 weighted checks (missing entities 0.3, conflicting requirements 0.3, vague adjectives without metrics 0.2, external resource without credential 0.2), and `askQuestionIfNeeded(requirements)` that emits a human-question EngineEvent + cancels the execution engine if score > 0.75. Registered the skill (req-ambiguity-detection) in skills.ts under the Requirements domain, owned by the planner agent. Wired into orchestrator.startBuild(): runs after capability detection, before planning; if ambiguous, cancels tasks, writes a Pending Question to Requirements Memory, and returns pendingQuestion in the result. Store surfaces the question as a system chat message and does NOT start the pipeline. Never invents requirements.
+- Verified: clear CRM prompt scores 0.00 → proceeds autonomously (log: "Ambiguity score 0.00 (threshold 0.75) — proceeding autonomously"). Ambiguous prompt "build something nice and modern that is free but also has stripe payments" scores 0.80 → triggers question (chat: "Clarification needed: ...No clear noun...Conflicts: free + paid/billing...Vague adjectives..."). Pipeline does not start. Lint clean, server 200, CRM export still produces 23 files.
+
+Stage Summary:
+- All 4 fails fixed. Re-verification: 42 PASS / 0 FAIL. Header Export button, 4 chips, Run disabled, no Publish, server 200, mobile 390px, export 23 files — all still working. No passing code touched.
