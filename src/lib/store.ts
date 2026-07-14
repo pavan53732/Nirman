@@ -172,7 +172,7 @@ export const useApp = create<AppState>((set, get) => ({
     void (async () => {
       let result;
       try {
-        result = await orchestrator.startBuild(prompt);
+        result = await orchestrator.startBuild(prompt, project.id);
       } catch (err) {
         get().addLog("error", "orchestrator", `startBuild failed: ${String(err)}`);
         console.error("[Pavan] orchestrator.startBuild failed:", err);

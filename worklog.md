@@ -277,3 +277,17 @@ Work Log:
 Stage Summary:
 - GREP VERIFICATION: pavan-orion-1 = 0, Pavan Cloud = 0, Acme Inc = 0, Forest Loop = 0, 24,580 = 0, Math.random() in store = 0, Math.random() in artifact-registry = 0, MockWebApp/MockWindowsApp/MockAndroidApp = 0, shortHash = 0, content.length/4 = 0. ALL MOCKS REMOVED.
 - Fresh load: "No project", "Describe your app idea", 4 chips, Run disabled, no Publish, no errors. "Build app" → asks clarification, status Idle, 0 files. Lint clean, server 200.
+
+---
+Task ID: 16
+Agent: Z.ai Code (main)
+Task: Replace mocks with real skills registry + real code-based preview (no empty preview, no mock UI).
+
+Work Log:
+- (1) Created src/lib/engine/skills/registry.ts with real SKILLS map: web (9 skills: nextjs-app-router, react-server-components, tailwind, prisma-sqlite, next-auth, crud-table, api-routes, tsc-validation, npm-build), windows (6 skills: winui3-dotnet8, xaml-datagrid-form, observable-object-relaycommand, efcore-sqlite-conditional, sln-csproj-generation, xml-validation), android (7 skills: kotlin-compose, navigation-compose, room-conditional, hilt-di, lazycolumn-crud, material3, gradle-kts-validation). TOTAL_SKILLS = 22. Each skill maps to a real generator function. Exported from engine index.
+- (2) Rewrote preview-panel.tsx — completely deleted MockWebApp/MockWindowsApp/MockAndroidApp. New RealPreview component fetches actual generated files from /api/workspace/list. Web target → CodeViewer with file tabs showing real source (auto-selects dashboard/page.tsx). Desktop target → SplitCodeViewer showing MainWindow.xaml + MainViewModel.cs side by side with note "Export and open .sln in Visual Studio to run". Android target → SplitCodeViewer showing ContactListScreen.kt + MainActivity.kt with note "Export and open in Android Studio to run". All code displayed with line numbers, file sizes, and real content from the workspace API. Empty state shows "No build yet — Describe your app idea in chat."
+- (3) Generators are already real skills — documented the mapping in registry.ts comments. web-generator.ts = nextjs-app-router skill, desktop-generator.ts = winui3-dotnet8 skill, android-generator.ts = kotlin-compose skill.
+- (4) Fixed project ID mismatch: orchestrator.startBuild() now accepts a projectId parameter passed from the store, so the workspace path (/tmp/pavan/<projectId>/<folder>) matches the project ID the preview panel uses to fetch files. Previously the orchestrator generated its own proj-${Date.now()} which was different from the store's project ID.
+
+Stage Summary:
+- VERIFIED: CRM 3-target build → 48 real files. Preview shows 3 tabs (Desktop App / Android Companion / Web Portal). Desktop tab shows REAL MainWindow.xaml code (DataGrid + Add form + Bindings) in SplitCodeViewer with line numbers and file selector listing all 11 desktop files (CrmDesktop.sln, App.xaml, MainViewModel.cs, etc.). 0 mocks: MockWebApp=0, Acme=0, 24,580=0, Forest Loop=0. Lint clean, server 200.

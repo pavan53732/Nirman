@@ -94,6 +94,14 @@ export {
   type AmbiguityCheck,
 } from "./skills/ambiguity-detector";
 export {
+  SKILLS,
+  TOTAL_SKILLS,
+  getSkillsForPlatform,
+  hasSkill,
+  type SkillPlatform,
+  type SkillId,
+} from "./skills/registry";
+export {
   idbSaveCheckpoint,
   idbLoadCheckpoints,
   idbLoadLatestCheckpoint,

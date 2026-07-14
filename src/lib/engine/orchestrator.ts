@@ -126,7 +126,7 @@ export class Orchestrator {
    * requirements/decision memory, compile the workflow DAG, submit to the
    * execution engine, and return the plan.
    */
-  async startBuild(prompt: string): Promise<OrchestrationResult & { tasks: Task[] }> {
+  async startBuild(prompt: string, projectId?: string): Promise<OrchestrationResult & { tasks: Task[] }> {
     executionEngine.reset();
     checkpointManager.clear();
     artifactRegistry.clear();
@@ -217,7 +217,7 @@ export class Orchestrator {
     // Materialize generated files to a real on-disk workspace so the
     // compilation gate can run `tsc --noEmit` against them. Attach the
     // workspace path to the compilation gate task + the build stage task.
-    const projectId = `proj-${Date.now()}`;
+    const wsProjectId = projectId ?? `proj-${Date.now()}`;
     const workspacePaths: Record<string, string> = {}; // targetId -> path
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i];
@@ -227,7 +227,7 @@ export class Orchestrator {
         const res = await fetch("/api/workspace", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ projectId, targetFolder: folder, files: gen.files }),
+          body: JSON.stringify({ projectId: wsProjectId, targetFolder: folder, files: gen.files }),
         });
         if (res.ok) {
           const { path: wsPath } = await res.json();
