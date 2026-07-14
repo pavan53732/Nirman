@@ -1,0 +1,138 @@
+{
+  "environment": {
+    "nodeVersion": "v24.18.0",
+    "platform": "linux x64",
+    "hostname": "c-6a566e95-144c75ca-320072e4c347",
+    "cpu": {
+      "model": "Intel(R) Xeon(R) Processor",
+      "cores": 2,
+      "speedMHz": 0
+    },
+    "ram": {
+      "totalGB": 3.95,
+      "freeGB": 2.2
+    },
+    "filesystem": "overlay",
+    "timestamp": "2026-07-14T19:45:21.866Z"
+  },
+  "runs": 20,
+  "results": {
+    "1": {
+      "samples": 20,
+      "durationMs": {
+        "mean": 4.1,
+        "median": 2,
+        "stdDev": 6.927481504847198,
+        "min": 1,
+        "max": 31,
+        "n": 20
+      },
+      "filesPerSecond": {
+        "mean": 10460.85,
+        "median": 9500,
+        "stdDev": 5583.37723062843,
+        "min": 612.9,
+        "max": 19000,
+        "n": 20
+      },
+      "heapDeltaMB": {
+        "mean": 0.6668499999999999,
+        "median": 0.6725,
+        "stdDev": 0.11943001088503677,
+        "min": 0.474,
+        "max": 0.855,
+        "n": 20
+      },
+      "fileCount": 19,
+      "totalBytes": 15185
+    },
+    "2": {
+      "samples": 20,
+      "durationMs": {
+        "mean": 3.25,
+        "median": 2,
+        "stdDev": 4.437059837324712,
+        "min": 1,
+        "max": 17,
+        "n": 20
+      },
+      "filesPerSecond": {
+        "mean": 10565.255000000001,
+        "median": 9500,
+        "stdDev": 4887.059042560772,
+        "min": 1117.6,
+        "max": 19000,
+        "n": 20
+      },
+      "heapDeltaMB": {
+        "mean": 1.1244500000000002,
+        "median": 1.1640000000000001,
+        "stdDev": 0.12414969794566559,
+        "min": 0.896,
+        "max": 1.302,
+        "n": 20
+      },
+      "fileCount": 19,
+      "totalBytes": 16083
+    },
+    "3": {
+      "samples": 20,
+      "durationMs": {
+        "mean": 6.75,
+        "median": 5,
+        "stdDev": 5.078139423056441,
+        "min": 4,
+        "max": 23,
+        "n": 20
+      },
+      "filesPerSecond": {
+        "mean": 9112.914999999999,
+        "median": 9600,
+        "stdDev": 2994.9176473277184,
+        "min": 2087,
+        "max": 12000,
+        "n": 20
+      },
+      "heapDeltaMB": {
+        "mean": 3.9858499999999992,
+        "median": 4.0665,
+        "stdDev": 0.22791912491057006,
+        "min": 3.393,
+        "max": 4.32,
+        "n": 20
+      },
+      "fileCount": 48,
+      "totalBytes": 43836
+    },
+    "4": {
+      "samples": 20,
+      "durationMs": {
+        "mean": 8.95,
+        "median": 5,
+        "stdDev": 8.902106492285968,
+        "min": 4,
+        "max": 35,
+        "n": 20
+      },
+      "filesPerSecond": {
+        "mean": 8349.09,
+        "median": 9600,
+        "stdDev": 3201.9541736102337,
+        "min": 1371.4,
+        "max": 12000,
+        "n": 20
+      },
+      "heapDeltaMB": {
+        "mean": 5.427349999999999,
+        "median": 5.99,
+        "stdDev": 1.3416511944242442,
+        "min": 0,
+        "max": 5.996,
+        "n": 20
+      },
+      "fileCount": 48,
+      "totalBytes": 44612
+    }
+  },
+  "generatedAt": "2026-07-14T19:45:24.335Z"
+}

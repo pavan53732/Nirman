@@ -753,3 +753,74 @@ Verification Artifacts:
 - /api/debug/memory-impact: SQLite vs PostgreSQL diff captured
 - /api/build/trace: 18 tasks, 17 batches, maxParallel=2, all completed
 - /api/agents/trace: 8 agents activated + completed, 18 total tasks
+
+---
+Task ID: Final-2 (Reviewer LOW-priority items)
+Agent: Z.ai Code (main)
+Task: Address all remaining LOW-priority reviewer items — benchmark methodology, SHA-256 repeatability, agent timeline, "files" definition, softened conclusion
+
+Work Log:
+- (1) Created scripts/benchmark.mjs — 20-run statistical benchmark with environment metadata (Node version, platform, CPU model/cores, RAM total/free, filesystem type, timestamp). Computes mean, median, stdDev, min, max for each scenario.
+- (2) Created scripts/repeatability-check.mjs — SHA-256 hash verification across 3 identical CRM builds. Correctly distinguishes deterministic content (structure hash + content hash = IDENTICAL) from non-deterministic timing data (performance hash = DIFFERENT due to timestamps/heap).
+- (3) Enhanced /api/debug/perf-profile route: added ?scenario=N query param for benchmark loops, added fileDefinition field clarifying "files" = in-memory VirtualFile[] strings (not filesystem writes), updated GET signature to accept Request.
+- (4) Captured agent activation timeline with chronological ordering and t+delta timestamps showing the 8-agent activation sequence over 3ms.
+
+Stage Summary — ALL REVIEWER LOW-PRIORITY ITEMS ADDRESSED:
+
+[LOW] Performance benchmark methodology → COMPLETE:
+  Environment:
+    Node: v24.18.0
+    Platform: linux x64
+    CPU: Intel(R) Xeon(R) Processor (2 cores @ 0 MHz)
+    RAM: 3.95 GB total, 2.2 GB free
+    Filesystem: overlay
+    Timestamp: 2026-07-14T19:45:21.866Z
+    Runs per scenario: 20
+  
+  Results (20 runs, mean±std):
+    Scenario                                 files  dur_ms (mean±std)   median    min    max  files/s   heapΔMB
+    Single-target web (small)                   19            4.1±6.9      2.0    1.0   31.0     10461     0.67
+    Single-target web (CRM)                     19            3.3±4.4      2.0    1.0   17.0     10565     1.12
+    3-target CRM                                48            6.8±5.1      5.0    4.0   23.0      9113     3.99
+    Stress (enterprise CRM, 3 targets)          48            8.9±8.9      5.0    4.0   35.0      8349     5.43
+
+[LOW] Files/sec definition → CLARIFIED:
+  "files" = in-memory generated string artifacts (VirtualFile[] = { path: string, content: string }).
+  These are template-generated strings returned by generateForTarget(). NOT filesystem writes.
+  The workspace API (/api/workspace) would later persist these to disk.
+  The "files/s" metric measures GENERATION throughput, not disk I/O.
+  (Added to perf-profile endpoint response as fileDefinition field + benchmark script header)
+
+[LOW] Repeatability via SHA-256 → PASSED:
+  Structure hash (file counts + sizes): b814c055... — IDENTICAL across 3 runs ✓
+  Content hash (generated code):        d1092e56... — IDENTICAL across 3 runs ✓
+  Performance hash (timing + heap):     DIFFERENT (expected — includes timestamps and heap measurements)
+  → Deterministic generation confirmed via SHA-256 content hash comparison. Exit code: 0.
+
+[LOW] Agent activation timeline → CAPTURED:
+  t+   0ms  requirements-analyst (Scribe)       ↓ Layer 2: Architecture
+  t+   1ms  planner (Atlas)                     ↓ Layer 1: Executive
+  t+   1ms  orchestrator (Conductor)            ↓ Layer 1: Executive  [11 tasks, 3ms duration]
+  t+   2ms  solution-architect (Vitruvius)      ↓ Layer 2: Architecture
+  t+   2ms  frontend-generator (Forge)          ↓ Layer 3: Engineering
+  t+   2ms  build-engineer (Cargo)              ↓ Layer 4: Quality & Delivery
+  t+   3ms  test-generator (Probe)              ↓ Layer 4: Quality & Delivery
+  t+   3ms  packaging-engineer (Bundle)           Layer 4: Quality & Delivery
+  Total: 8 agents, 18 tasks, all completed.
+
+[INFO] Cross-platform → remains explicitly out of scope (requires different machine).
+
+Conclusion wording → SOFTENED per reviewer:
+  Old: "stronger confidence in production readiness"
+  New: "provides substantially stronger confidence in functional correctness and deployment readiness within the tested environment"
+
+Verification Artifacts:
+- tsc --noEmit: 0 errors in src/
+- bun run lint: clean (exit 0)
+- node scripts/regression-tests.mjs: PASSED 5/5 (exit 0)
+- node scripts/repeatability-check.mjs: PASSED (exit 0) — content hashes identical
+- node scripts/benchmark.mjs --runs=20: completed, raw data in benchmark-results.json
+- /api/debug/failure-test: 5/5 passed, allGraceful=true
+- /api/debug/perf-profile: fileDefinition field added, ?scenario=N supported
+- /api/build/trace: 18 tasks, 17 batches
+- /api/agents/trace: 8 agents, timeline captured
