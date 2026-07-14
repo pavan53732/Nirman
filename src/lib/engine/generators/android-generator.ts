@@ -23,7 +23,7 @@
 //   gradle/wrapper/gradle-wrapper.properties
 //   README.md
 
-import type { VirtualFile, GenerationResult } from "../generators";
+import type { VirtualFile, GenerationResult, DatabaseChoice } from "../generators";
 import { registerFiles } from "../generators";
 import type { Capability, NonFunctional } from "../types";
 import { inferDataModel, pascal, camel, type DataModel } from "./data-model";
@@ -34,6 +34,20 @@ export interface AndroidGenerationContext {
   prompt: string;
   capabilities: Capability[];
   nonFunctionals: NonFunctional[];
+  /**
+   * Database choice read from Architecture Memory. Defaults to "sqlite".
+   *
+   * On Android, Room is local-only (it wraps SQLite on the device). When the
+   * user selects PostgreSQL we don't fake a direct PG driver — instead we
+   * keep the Room layer (for offline cache) and ADD:
+   *   - DATABASE_MIGRATION.md explaining the client/server split
+   *   - data/remote/RetrofitApiService.kt — a Retrofit interface sketch
+   *     that hits the backend API which owns the PG connection.
+   *
+   * This is honest: Android never talks to PostgreSQL directly. The note +
+   * Retrofit sketch document the real architecture the user must build.
+   */
+  database?: DatabaseChoice;
 }
 
 export function generateAndroidApp(ctx: AndroidGenerationContext): GenerationResult {
@@ -47,6 +61,12 @@ export function generateAndroidApp(ctx: AndroidGenerationContext): GenerationRes
   const entityLower = model.entityNameLower;
   const entityRoute = entity.toLowerCase(); // lowercase route + table name
   const useRoom = capabilities.includes("offline-sync") || nonFunctionals.includes("offline-first");
+  // Architecture Memory's database choice. PostgreSQL on Android is unusual:
+  // Room is local-only, so we ADD a DATABASE_MIGRATION.md note + Retrofit
+  // API service sketch rather than fake direct PG access. See the bottom of
+  // this function for the extra files emitted when usePostgres is true.
+  const database: DatabaseChoice = ctx.database ?? "sqlite";
+  const usePostgres = database === "postgresql";
   void nonFunctionals;
 
   const files: VirtualFile[] = [];
@@ -786,8 +806,130 @@ zipStorePath=wrapper/dists
     language: "text",
     content: `# Add project specific ProGuard rules here.
 -keep class ${pkgName}.data.local.** { *; }
-`,
+${usePostgres ? `-keep class ${pkgName}.data.remote.** { *; }\n-keepattributes Signature\n-keepattributes *Annotation*\n` : ""}`,
   });
+
+  // ---- PostgreSQL branch: Room is local-only, so add a migration note ----
+  // and a Retrofit API service sketch. Android never talks to PostgreSQL
+  // directly — the backend API owns the PG connection. This is the honest
+  // architecture when Architecture Memory says "Database: PostgreSQL".
+  if (usePostgres) {
+    files.push({
+      path: `DATABASE_MIGRATION.md`,
+      language: "markdown",
+      content: `# Database Migration Note — PostgreSQL on Android
+
+Architecture Memory for this project specifies **PostgreSQL** as the database.
+
+## TL;DR
+Room (the persistence library already scaffolded in this app) is **local-only**
+— it wraps SQLite on the device. It cannot connect to a remote PostgreSQL
+server directly. To use PostgreSQL from Android you must:
+
+1. Run a backend API (Next.js / ASP.NET / FastAPI / etc.) that owns the
+   PostgreSQL connection. (Pavan generates this for the **web** or **api**
+   target of the same build — see the sibling workspace.)
+2. From Android, call that backend API via HTTP (Retrofit / Ktor / OkHttp).
+3. Optionally keep Room as an **offline cache** that syncs with the API —
+   this is the recommended "offline-first with remote source of truth"
+   pattern (see the Room + remote mediator docs).
+
+## What this generator did
+- Kept the existing Room layer (${entity}Entity + ${entity}Dao + AppDatabase)
+  as the local cache / offline storage.
+- Added \`app/src/main/java/${pkgPath}/data/remote/RetrofitApiService.kt\` —
+  a Retrofit interface sketch with the standard CRUD endpoints that match
+  the backend API (e.g. \`/api/${entityRoute}s\`).
+
+## What you need to add
+1. **Network security config** — allow cleartext traffic only in debug.
+   Add \`app/src/main/res/xml/network_security_config.xml\` and reference it
+   from the manifest's \`<application>\` tag.
+2. **Retrofit + Moshi dependencies** in \`app/build.gradle.kts\`:
+   \`\`\`kotlin
+   implementation("com.squareup.retrofit2:retrofit:2.11.0")
+   implementation("com.squareup.retrofit2:converter-moshi:2.11.0")
+   implementation("com.squareup.moshi:moshi-kotlin:1.15.1")
+   \`\`\`
+3. **Internet permission** in \`AndroidManifest.xml\`:
+   \`\`\`xml
+   <uses-permission android:name="android.permission.INTERNET" />
+   \`\`\`
+4. **Wire RetrofitApiService into the repository** — fetch from the API,
+   upsert into Room (single source of truth), and observe Room via Flow.
+   Consider \`RemoteMediator\` (Paging 3) for paginated sync.
+
+## Why no direct PostgreSQL driver?
+- No official, maintained JDBC driver ships in a form suitable for Android
+  (JDBC on Android is fragile, leaks threads, and requires embedding PG
+  credentials in the APK — a security antipattern).
+- The platform convention since 2014 is to use a backend API as the data
+  owner; direct DB access from mobile clients is widely considered an
+  anti-pattern.
+
+Generated by Pavan — Autonomous Software Creator.
+`,
+    });
+
+    files.push({
+      path: `app/src/main/java/${pkgPath}/data/remote/RetrofitApiService.kt`,
+      language: "kotlin",
+      content: `package ${pkgName}.data.remote
+
+import ${pkgName}.data.local.${entity}Entity
+import retrofit2.Response
+import retrofit2.http.Body
+import retrofit2.http.DELETE
+import retrofit2.http.GET
+import retrofit2.http.POST
+import retrofit2.http.Path
+import retrofit2.http.Query
+
+/**
+ * Retrofit interface sketch for the backend API that owns the PostgreSQL
+ * connection. Generated because Architecture Memory selected PostgreSQL as the
+ * database — Room (local SQLite) cannot reach PG directly, so this app talks
+ * to the backend over HTTP and uses Room as an offline cache.
+ *
+ * The backend endpoints mirror the ones the Pavan Web Generator emits at
+ * \`/api/${entityRoute}s\` (see the sibling web target). Adjust paths to match
+ * your actual API.
+ *
+ * Wire this into ${entity}Repository:
+ *   1. Inject \`RetrofitApiService\` via Hilt.
+ *   2. On fetch: call \`apiService.getAll()\`, upsert into the DAO, observe DAO
+ *      via Flow (single source of truth).
+ *   3. On write: call the API first; on success, upsert into the DAO. Use a
+ *      work manager / sync adapter for retry-on-failure.
+ */
+interface RetrofitApiService {
+
+    @GET("/api/${entityRoute}s")
+    suspend fun getAll(
+        @Query("page") page: Int = 1,
+        @Query("pageSize") pageSize: Int = 50,
+    ): Response<List<${entity}Entity>>
+
+    @GET("/api/${entityRoute}s/{id}")
+    suspend fun getById(@Path("id") id: String): Response<${entity}Entity>
+
+    @POST("/api/${entityRoute}s")
+    suspend fun create(@Body item: ${entity}Entity): Response<${entity}Entity>
+
+    @POST("/api/${entityRoute}s/{id}")
+    suspend fun update(@Path("id") id: String, @Body item: ${entity}Entity): Response<${entity}Entity>
+
+    @DELETE("/api/${entityRoute}s/{id}")
+    suspend fun delete(@Path("id") id: String): Response<Unit>
+
+    companion object {
+        // TODO: move to BuildConfig so dev/stage/prod can differ.
+        const val BASE_URL = "http://10.0.2.2:3000/"
+    }
+}
+`,
+    });
+  }
 
   // ---- README ----
   files.push({
@@ -805,7 +947,14 @@ ${useRoom ? `- Room database (${entity}Entity + ${entity}Dao + AppDatabase)
 - Repository pattern (${entity}Repository)
 ` : ""}- ${entity}ViewModel with StateFlow
 - ${entity}ListScreen with LazyColumn + add form + delete
-
+${usePostgres ? `
+## PostgreSQL note
+Architecture Memory selected PostgreSQL as the project database. Room is
+local-only on Android, so this app talks to the backend API (which owns the
+PG connection) over HTTP. See \`DATABASE_MIGRATION.md\` for the full plan and
+\`app/src/main/java/${pkgPath}/data/remote/RetrofitApiService.kt\` for the
+Retrofit interface sketch.
+` : ""}
 ## Build
 \`\`\`bash
 ./gradlew assembleDebug
@@ -818,6 +967,8 @@ ${useRoom ? `- Room database (${entity}Entity + ${entity}Dao + AppDatabase)
 ${useRoom ? `- \`app/src/main/java/${pkgPath}/data/local/\` — Room DB, DAO, Entity
 - \`app/src/main/java/${pkgPath}/data/repository/\` — Repository
 - \`app/src/main/java/${pkgPath}/di/AppModule.kt\` — Hilt module
+` : ""}${usePostgres ? `- \`app/src/main/java/${pkgPath}/data/remote/RetrofitApiService.kt\` — Retrofit API sketch
+- \`DATABASE_MIGRATION.md\` — Android ↔ PostgreSQL migration plan
 ` : ""}
 ## Min SDK
 - minSdk 26, targetSdk 34, Java 17
@@ -827,5 +978,9 @@ Generated by Pavan — Autonomous Software Creator.
   });
 
   void camel;
-  return registerFiles(files, "android", "Kotlin + Jetpack Compose" + (useRoom ? " + Room + Hilt" : ""), "android-generator", targetId, "source-code", "generate");
+  const stackLabel =
+    "Kotlin + Jetpack Compose" +
+    (useRoom ? " + Room + Hilt" : "") +
+    (usePostgres ? " + Retrofit (PG via API)" : "");
+  return registerFiles(files, "android", stackLabel, "android-generator", targetId, "source-code", "generate");
 }

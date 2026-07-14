@@ -31,8 +31,40 @@ import { observability } from "./observability";
 import { selfHealController } from "./self-healing";
 import { registries } from "./registries";
 import { tokenBudgetManager } from "./provider-abstraction";
-import { generateForTarget } from "./generators";
+import { generateForTarget, type DatabaseChoice } from "./generators";
 import { askQuestionIfNeeded, detectAmbiguity, AMBIGUITY_THRESHOLD } from "./skills/ambiguity-detector";
+import { agentRuntime, initAgentRuntime } from "./agent-runtime";
+
+// Debounced trace sync — POSTs the client-side executionEngine trace + agent
+// activations to the server so /api/build/trace and /api/agents/trace return
+// real data after a client-side build. The orchestrator runs in the browser
+// (Zustand store), so without this sync the server-side trace endpoints would
+// always return empty.
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleTraceSync(): void {
+  if (typeof window === "undefined") return; // SSR guard
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(async () => {
+    syncTimer = null;
+    try {
+      const trace = executionEngine.getTrace();
+      await fetch("/api/build/trace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trace }),
+      });
+    } catch { /* best-effort */ }
+    try {
+      const activations = agentRuntime.getActivations();
+      const summary = agentRuntime.getSummary();
+      await fetch("/api/agents/trace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summary, activations }),
+      });
+    } catch { /* best-effort */ }
+  }, 250);
+}
 
 export interface OrchestrationResult {
   workflow: Workflow;
@@ -118,8 +150,13 @@ export class Orchestrator {
   bootstrap(): void {
     // registries are populated by the index module import side-effects;
     // here we just wire observability to the execution engine event bus.
+    initAgentRuntime();
     executionEngine.subscribe((e) => {
       observability.recordEvent(e);
+      // Sync trace + agent activations to the server so the debug endpoints
+      // return real data after a client-side build. Debounced to avoid
+      // flooding the server with one POST per event.
+      scheduleTraceSync();
     });
   }
 
@@ -171,6 +208,23 @@ export class Orchestrator {
     projectMemory.write("decision", "Stack Selection", decisions.map((d) => `${d.topic}: ${d.chosen} (${d.confidence})`).join("\n"), "decision-engine");
     projectMemory.write("architecture", "Capabilities", capabilities.join(", ") || "none", "decision-engine");
 
+    // ---- READ Architecture Memory: database choice drives generator output ----
+    // The user (or a future LLM agent) may write "Database: PostgreSQL" to
+    // Architecture Memory. Generators branch on this — Prisma provider, EF Core
+    // provider, Android persistence note. Reading memory HERE proves memory has
+    // real impact on generated output (see /api/debug/memory-impact).
+    const database = readDatabaseFromMemory();
+    if (database !== "sqlite") {
+      // Surface the parsed choice in Decision Memory so the UI + downstream
+      // agents can see that the database was overridden by Architecture Memory.
+      projectMemory.write(
+        "decision",
+        "Database Choice (from Architecture Memory)",
+        database,
+        "orchestrator"
+      );
+    }
+
     // Workflow selection
     const workflow = workflowEngine.select(prompt);
     observability.recordEvent({
@@ -194,6 +248,7 @@ export class Orchestrator {
         prompt,
         capabilities,
         nonFunctionals: detectNonFunctionals(prompt),
+        database,
       });
       observability.recordEvent({
         id: `ev-${Date.now()}-gen-${i}`,
@@ -382,6 +437,39 @@ export class Orchestrator {
 }
 
 export const orchestrator = new Orchestrator();
+
+/**
+ * Read the configured database choice from Architecture Memory.
+ *
+ * Generators must branch on the database selected for the project (e.g.
+ * SQLite for offline-first vs PostgreSQL for client/server). Architecture
+ * Memory is the source of truth — when an LLM agent (or the user) writes
+ * "Database: PostgreSQL" there, every subsequent generator run should emit
+ * the PostgreSQL flavor of the Prisma schema / EF Core provider / Android
+ * note. This helper reads memory and parses the choice.
+ *
+ * Order matters: PostgreSQL is checked first so a record that says
+ * "Database: PostgreSQL" wins even if older records mentioned SQLite.
+ * Defaults to "sqlite" when memory is empty or no database record exists.
+ *
+ * Records are matched on lowercased `content`; the title is ignored so the
+ * helper works with any naming convention (e.g. "Database", "Database Choice",
+ * "Storage", etc.). Both `database: postgres` and bare `postgresql` match.
+ */
+export function readDatabaseFromMemory(): DatabaseChoice {
+  const records = projectMemory.read("architecture");
+  // Scan newest-first so the latest database decision wins.
+  for (const r of [...records].sort((a, b) => b.createdAt - a.createdAt)) {
+    const content = r.content.toLowerCase();
+    if (/database\s*[:=]?\s*postgres/.test(content) || /\bpostgresql\b/.test(content)) {
+      return "postgresql";
+    }
+    if (/database\s*[:=]?\s*sqlite/.test(content) || /\bsqlite\b/.test(content)) {
+      return "sqlite";
+    }
+  }
+  return "sqlite"; // default — matches the existing offline-first behavior
+}
 
 /** Derive a clean project name from the prompt (shared with the store). */
 function promptToName(prompt: string): string {

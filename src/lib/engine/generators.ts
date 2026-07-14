@@ -19,12 +19,35 @@ export interface VirtualFile {
   language?: string;
 }
 
+/**
+ * Database choice read from Architecture Memory. Drives generator branching:
+ *   - "sqlite"     → Prisma `provider = "sqlite"` + EF Core `UseSqlite` + Room (local)
+ *   - "postgresql" → Prisma `provider = "postgresql"` + EF Core `UseNpgsql` + Android Retrofit note
+ *
+ * Defaults to "sqlite" when Architecture Memory has no database record (matches
+ * the original offline-first behavior). See `readDatabaseFromMemory()` in
+ * orchestrator.ts.
+ */
+export type DatabaseChoice = "sqlite" | "postgresql";
+
 export interface GenerationResult {
   platform: PlatformKind;
   stack: string;
   files: VirtualFile[];
   producedBy: AgentRole;
   artifactIds: string[];
+}
+
+/** Options passed to a generator (the orchestrator's ctx for `generateForTarget`). */
+export interface GeneratorContext {
+  prompt: string;
+  capabilities: import("./types").Capability[];
+  nonFunctionals: import("./types").NonFunctional[];
+  /**
+   * Database choice read from Architecture Memory by the orchestrator. When
+   * undefined, generators fall back to "sqlite" (their original default).
+   */
+  database?: DatabaseChoice;
 }
 
 /** Slugify a project name into a valid identifier. */
@@ -471,7 +494,7 @@ export function generateForTarget(
   stack: string,
   projectName: string,
   targetId: string,
-  ctx?: { prompt: string; capabilities: import("./types").Capability[]; nonFunctionals: import("./types").NonFunctional[] }
+  ctx?: GeneratorContext
 ): GenerationResult {
   if (platform === "windows") {
     // Both WinUI 3 and Tauri paths produce a real, compilable solution.
@@ -485,6 +508,7 @@ export function generateForTarget(
         prompt: ctx.prompt,
         capabilities: ctx.capabilities,
         nonFunctionals: ctx.nonFunctionals,
+        database: ctx.database,
       });
     }
     if (/tauri/i.test(stack)) return generateTauri(projectName, targetId);
@@ -500,6 +524,7 @@ export function generateForTarget(
         prompt: ctx.prompt,
         capabilities: ctx.capabilities,
         nonFunctionals: ctx.nonFunctionals,
+        database: ctx.database,
       });
     }
     if (/flutter/i.test(stack)) return generateFlutter(projectName, targetId);
@@ -514,6 +539,7 @@ export function generateForTarget(
         prompt: ctx.prompt,
         capabilities: ctx.capabilities,
         nonFunctionals: ctx.nonFunctionals,
+        database: ctx.database,
       });
     }
     return generateNextjs(projectName, targetId);

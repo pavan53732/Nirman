@@ -23,6 +23,140 @@ export interface ExecutionEngineOptions {
   onTaskDone?: (task: Task) => void;
 }
 
+/* ---------------- Build Trace Recorder ---------------- */
+//
+// Records a per-task runtime trace that PROVES the ExecutionEngine actually
+// performs parallel scheduling, dependency resolution, and deterministic
+// completion ordering at runtime. Each task gets one TraceEntry with:
+//   - scheduledAt: ts when submit()/submitAll() registered the task
+//   - startedAt:   ts when the executor actually picked it up
+//   - completedAt: ts when complete() finished (success or failure)
+//   - parallelBatch: wave number — increments when the scheduler dispatches
+//     2+ tasks in the same trySchedule() tick OR after a >50ms gap (which
+//     indicates the previous wave's async work finished and a new wave is
+//     starting). Tasks in the same batch are the ones that ran in parallel.
+//
+// The trace is exposed via executionEngine.getTrace() and the
+// /api/build/trace HTTP endpoint for runtime inspection.
+
+export interface TraceEntry {
+  taskId: string;
+  taskTitle: string;
+  agent: string; // task.agent
+  stageId: string;
+  dependsOn: string[]; // task.dependsOn at scheduling time
+  scheduledAt: number; // ms timestamp when submit()/submitAll() was called
+  startedAt: number | null; // when executor actually picked it up
+  completedAt: number | null;
+  status: "pending" | "running" | "completed" | "failed";
+  parallelBatch: number; // 1, 2, 3... — wave number (see above)
+}
+
+export class BuildTrace {
+  private entries = new Map<string, TraceEntry>();
+  private currentBatch = 0;
+  private lastDispatchTs = 0;
+  // 50ms gap between scheduler dispatches is treated as a wave boundary —
+  // short enough that synchronous submitAll() bursts stay in one batch,
+  // long enough that real async tool completions (which take ≥1 tick) start
+  // a new batch when they unblock dependent tasks.
+  private static readonly WAVE_GAP_MS = 50;
+
+  /** Record that a task was scheduled (called from submit()). */
+  recordScheduled(task: Task): void {
+    if (this.entries.has(task.id)) return;
+    this.entries.set(task.id, {
+      taskId: task.id,
+      taskTitle: task.title,
+      agent: task.agent,
+      stageId: task.stageId,
+      dependsOn: [...task.dependsOn],
+      scheduledAt: Date.now(),
+      startedAt: null,
+      completedAt: null,
+      status: "pending",
+      parallelBatch: 0, // assigned when the task actually starts
+    });
+  }
+
+  /**
+   * Decide the parallelBatch number for a new scheduler wave.
+   * Called ONCE per trySchedule() call that actually dispatches ≥1 task.
+   * `tasks` = the tasks about to start in this tick (used to detect new
+   * waves triggered by synchronous in-memory completions, where the time
+   * gap is 0ms but a dep that just completed proves a wave boundary).
+   * Returns the batch number to assign to all of them.
+   */
+  nextBatch(tasks: Task[]): number {
+    const now = Date.now();
+    const gap = now - this.lastDispatchTs;
+    // New wave when:
+    //   - first ever dispatch (currentBatch === 0)
+    //   - 2+ tasks dispatched in the same scheduler tick (true parallel batch)
+    //   - significant time gap since the previous dispatch (>50ms) — previous
+    //     wave's async work finished and a new wave is starting
+    //   - any task being dispatched has a dependency that completed in the
+    //     CURRENT batch — proves a synchronous in-memory cascade where a
+    //     dep finished and its dependent is now starting (a new wave even
+    //     though Date.now() hasn't advanced)
+    const hasDepInCurrentBatch = tasks.some((t) =>
+      t.dependsOn.some((depId) => {
+        const dep = this.entries.get(depId);
+        return (
+          !!dep &&
+          dep.parallelBatch === this.currentBatch &&
+          dep.status === "completed"
+        );
+      })
+    );
+    const isNewWave =
+      this.currentBatch === 0 ||
+      tasks.length >= 2 ||
+      gap > BuildTrace.WAVE_GAP_MS ||
+      hasDepInCurrentBatch;
+    if (isNewWave) {
+      this.currentBatch++;
+    }
+    this.lastDispatchTs = now;
+    return this.currentBatch;
+  }
+
+  /** Record that a task transitioned to running. */
+  recordStarted(task: Task, batch: number): void {
+    const e = this.entries.get(task.id);
+    if (!e) return;
+    e.startedAt = Date.now();
+    e.status = "running";
+    e.parallelBatch = batch;
+  }
+
+  /** Record that a task finished (success or failure). */
+  recordCompleted(task: Task, status: "completed" | "failed"): void {
+    const e = this.entries.get(task.id);
+    if (!e) return;
+    e.completedAt = Date.now();
+    e.status = status;
+  }
+
+  /** Full trace sorted by scheduledAt then startedAt (stable, deterministic). */
+  getTrace(): TraceEntry[] {
+    return [...this.entries.values()].sort((a, b) => {
+      if (a.scheduledAt !== b.scheduledAt) return a.scheduledAt - b.scheduledAt;
+      const as = a.startedAt ?? 0;
+      const bs = b.startedAt ?? 0;
+      if (as !== bs) return as - bs;
+      return a.taskId.localeCompare(b.taskId);
+    });
+  }
+
+  /** Reset the trace (called from ExecutionEngine.reset()). */
+  clear(): void {
+    this.entries.clear();
+    this.currentBatch = 0;
+    this.lastDispatchTs = 0;
+  }
+}
+
 export class ExecutionEngine {
   private tasks = new Map<string, Task>();
   private queue: string[] = []; // task ids ready/queued
@@ -33,6 +167,7 @@ export class ExecutionEngine {
   private onTaskDone?: (task: Task) => void;
   private cancelled = false;
   private eventCounter = 0;
+  private trace = new BuildTrace();
 
   constructor(opts: ExecutionEngineOptions = { maxParallel: 4 }) {
     this.maxParallel = opts.maxParallel;
@@ -52,6 +187,9 @@ export class ExecutionEngine {
   /* ---------------- Task Queue + Dependency Scheduler ---------------- */
   submit(task: Task): void {
     this.tasks.set(task.id, task);
+    // Record the task in the build trace BEFORE any scheduling — this captures
+    // the scheduledAt timestamp at the moment the task entered the engine.
+    this.trace.recordScheduled(task);
     task.status = task.dependsOn.length === 0 ? "ready" : "queued";
     this.emit({ type: "task-queued", taskId: task.id, workflowId: task.workflowId, message: `Queued: ${task.title}`, level: "debug" });
     this.trySchedule();
@@ -74,14 +212,23 @@ export class ExecutionEngine {
         promoted++;
       }
     }
-    // Start ready tasks up to the parallelism limit
+    // Collect ready tasks up to the parallelism limit. We snapshot the
+    // dispatch list BEFORE calling start() so that all tasks dispatched in
+    // this scheduler tick can be tagged with the same parallelBatch number.
     const ready = [...this.tasks.values()].filter((t) => t.status === "ready");
+    const toDispatch: Task[] = [];
     for (const t of ready) {
-      if (this.running.size >= this.maxParallel) break;
-      this.start(t);
+      if (this.running.size + toDispatch.length >= this.maxParallel) break;
+      toDispatch.push(t);
+    }
+    if (toDispatch.length > 0) {
+      const batch = this.trace.nextBatch(toDispatch);
+      for (const t of toDispatch) {
+        this.start(t, batch);
+      }
     }
     if (promoted > 0 || ready.length > 0) {
-      this.emit({ type: "task-queued", message: `trySchedule: promoted ${promoted}, started ${Math.min(ready.length, this.maxParallel - 0)}, running=${this.running.size}`, level: "debug" });
+      this.emit({ type: "task-queued", message: `trySchedule: promoted ${promoted}, started ${toDispatch.length}, running=${this.running.size}`, level: "debug" });
     }
   }
 
@@ -97,10 +244,14 @@ export class ExecutionEngine {
   // server-side ToolManager through the client bridge) or, for non-tool tasks,
   // complete immediately with a real measured duration. Gate tasks run real
   // tsc/eslint and self-heal via the LLM repair API on failure.
-  private start(task: Task): void {
+  private start(task: Task, batch: number): void {
     task.status = "running";
     task.startedAt = Date.now();
     this.running.add(task.id);
+    // Record the start (with the wave's parallelBatch number) AFTER the
+    // task is marked running but BEFORE the task-started event fires, so
+    // any subscriber that reads getTrace() sees the running state.
+    this.trace.recordStarted(task, batch);
     this.emit({ type: "task-started", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `Started: ${task.title}`, level: "info" });
 
     // Fire-and-forget async completion. The duration is measured from real
@@ -123,6 +274,7 @@ export class ExecutionEngine {
         task.result = result.success ? "ok" : `exit ${result.exitCode}`;
         if (!result.success) {
           task.status = "failed";
+          this.trace.recordCompleted(task, "failed");
           this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `${task.title} failed (exit ${result.exitCode}): ${result.stderr.slice(0, 200)}`, level: "error" });
           this.trySchedule();
           return;
@@ -130,6 +282,7 @@ export class ExecutionEngine {
         this.emit({ type: "task-succeeded", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `${task.title} done in ${result.durationMs}ms (real tool run)`, level: "success" });
       } catch (err) {
         task.status = "failed";
+        this.trace.recordCompleted(task, "failed");
         this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `${task.title} tool error: ${String(err)}`, level: "error" });
         this.trySchedule();
         return;
@@ -142,6 +295,7 @@ export class ExecutionEngine {
       const result = await this.runGateWithHealing(task, gateCtx);
       if (!result.passed) {
         task.status = "failed";
+        this.trace.recordCompleted(task, "failed");
         this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `Gate failed: ${task.gate} — ${result.detail}`, level: "warn" });
         this.trySchedule();
         return;
@@ -151,6 +305,7 @@ export class ExecutionEngine {
 
     task.status = "succeeded";
     if (!task.result) task.result = "ok";
+    this.trace.recordCompleted(task, "completed");
     this.emit({ type: "task-succeeded", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `Done: ${task.title} (${task.durationMs}ms)`, level: "success" });
     this.onTaskDone?.(task);
     this.trySchedule();
@@ -291,6 +446,9 @@ export class ExecutionEngine {
     this.timers.clear();
     for (const t of this.tasks.values()) {
       if (t.status === "running" || t.status === "ready" || t.status === "queued") {
+        // Mark any in-flight task as failed in the trace so the runtime
+        // record reflects that it did not complete.
+        if (t.status === "running") this.trace.recordCompleted(t, "failed");
         t.status = "cancelled";
       }
     }
@@ -303,9 +461,20 @@ export class ExecutionEngine {
     this.tasks.clear();
     this.queue = [];
     this.running.clear();
+    this.trace.clear();
   }
 
   /* ---------------- Introspection ---------------- */
+  /**
+   * Runtime task-graph trace: one TraceEntry per task with scheduledAt,
+   * startedAt, completedAt, status, and parallelBatch (wave number). Used to
+   * PROVE parallel scheduling, dependency resolution, and completion ordering
+   * actually happen at runtime. Exposed via /api/build/trace.
+   */
+  getTrace(): TraceEntry[] {
+    return this.trace.getTrace();
+  }
+
   allTasks(): Task[] {
     return [...this.tasks.values()];
   }

@@ -10,7 +10,7 @@ import { tools } from "./data/tools";
 import { agents } from "./data/agents";
 import { platformAdapters, previewProviders, providers } from "./data/adapters";
 
-import { orchestrator } from "./orchestrator";
+import { orchestrator, readDatabaseFromMemory } from "./orchestrator";
 import { executionEngine, checkpointManager, makeTask } from "./execution-engine";
 import { workflowEngine } from "./workflow-engine";
 import { projectMemory, contextBuilder } from "./memories";
@@ -19,6 +19,7 @@ import { decisionEngine, detectCapabilities, detectNonFunctionals } from "./deci
 import { detectTargets } from "./orchestrator";
 import { selfHealController, evaluateGate, GATE_META, DEFAULT_SELF_HEAL_POLICY } from "./self-healing";
 import { observability } from "./observability";
+import { agentRuntime, initAgentRuntime, AGENT_LABELS, AGENT_LAYERS } from "./agent-runtime";
 import { providerManager, modelRouter, costOptimizer, tokenBudgetManager } from "./provider-abstraction";
 import {
   generateForTarget,
@@ -57,6 +58,7 @@ export {
   stageAgentMap,
   agents,
   orchestrator,
+  readDatabaseFromMemory,
   executionEngine,
   checkpointManager,
   makeTask,
@@ -73,6 +75,10 @@ export {
   GATE_META,
   DEFAULT_SELF_HEAL_POLICY,
   observability,
+  agentRuntime,
+  initAgentRuntime,
+  AGENT_LABELS,
+  AGENT_LAYERS,
   providerManager,
   modelRouter,
   costOptimizer,
@@ -85,7 +91,7 @@ export {
   generateFlutter,
   generateRustCli,
 };
-export type { GenerationResult } from "./generators";
+export type { GenerationResult, DatabaseChoice, VirtualFile } from "./generators";
 export {
   detectAmbiguity,
   askQuestionIfNeeded,
@@ -114,3 +120,4 @@ export {
 } from "./idb";
 
 export * from "./types";
+export type { AgentActivation } from "./agent-runtime";

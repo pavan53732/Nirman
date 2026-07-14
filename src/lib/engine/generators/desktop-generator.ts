@@ -16,7 +16,7 @@
 //   src/MyApp/Properties/PublishProfiles/FolderProfile.pubxml
 //   README.md
 
-import type { VirtualFile, GenerationResult } from "../generators";
+import type { VirtualFile, GenerationResult, DatabaseChoice } from "../generators";
 import { registerFiles } from "../generators";
 import type { Capability, NonFunctional } from "../types";
 import { inferDataModel, pascal, camel, type DataModel } from "./data-model";
@@ -27,6 +27,13 @@ export interface DesktopGenerationContext {
   prompt: string;
   capabilities: Capability[];
   nonFunctionals: NonFunctional[];
+  /**
+   * Database choice read from Architecture Memory. Defaults to "sqlite".
+   * When "postgresql", EF Core switches to Npgsql (`UseNpgsql` + the
+   * `Npgsql.EntityFrameworkCore.PostgreSQL` package) and the connection
+   * string reads `DATABASE_URL` from the environment.
+   */
+  database?: DatabaseChoice;
 }
 
 /** Map a DataField type to a C# type. */
@@ -63,10 +70,21 @@ export function generateWinUI3App(ctx: DesktopGenerationContext): GenerationResu
   const { projectName, targetId, prompt, capabilities, nonFunctionals } = ctx;
   const appName = pascal(projectName) || "MyApp";
   const useSqlite = capabilities.includes("offline-sync") || nonFunctionals.includes("offline-first");
+  // Architecture Memory's database choice. PostgreSQL forces EF Core on even
+  // when the prompt doesn't mention offline-first (the user explicitly chose a
+  // client/server database).
+  const database: DatabaseChoice = ctx.database ?? "sqlite";
+  const usePostgres = database === "postgresql";
+  const useEfCore = useSqlite || usePostgres;
   const model = inferDataModel(prompt);
   const entity = model.entityName;
   const entityLower = model.entityNameLower;
   const entitiesLower = model.entityNamePluralLower;
+  // DB package + provider config (branched on Architecture Memory's database).
+  const efCorePackage = usePostgres
+    ? `    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.0" />`
+    : `    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.10" />`;
+  const efCoreProviderLabel = usePostgres ? "PostgreSQL" : "SQLite";
 
   const files: VirtualFile[] = [];
 
@@ -121,7 +139,7 @@ EndGlobal
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.241114003" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
-${useSqlite ? `    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.10" />
+${useEfCore ? `${efCorePackage}
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.10" />
 ` : ""}  </ItemGroup>
 
@@ -186,7 +204,7 @@ public partial class App : Application
     /// </summary>
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-${useSqlite ? `        // Ensure the SQLite database is created on first launch.
+${useEfCore ? `        // Ensure the ${efCoreProviderLabel} database is created on first launch.
         using (var db = new AppDbContext())
         {
             db.Database.EnsureCreated();
@@ -234,7 +252,23 @@ ${modelProps}
   });
 
   // ---- Data/AppDbContext.cs ----
-  if (useSqlite) {
+  // Branch on Architecture Memory's database choice:
+  //   sqlite (default)     → UseSqlite("Data Source=<app>.db")  [offline-first]
+  //   postgresql           → UseNpgsql(Environment.GetEnvironmentVariable("DATABASE_URL") ?? fallback)
+  if (useEfCore) {
+    const onConfiguringBody = usePostgres
+      ? `        // PostgreSQL — connection string from DATABASE_URL (set in env).
+        // Falls back to a local dev instance for first-run convenience.
+        var connectionString = Environment.GetEnvironmentVariable("DATABASE_URL")
+            ?? "Host=localhost;Database=appdb;Username=postgres;Password=postgres";
+        options.UseNpgsql(connectionString);`
+      : `        // SQLite (offline-first) — local file in LocalApplicationData.
+        options.UseSqlite($"Data Source={DbPath}");`;
+    const ctorBody = usePostgres
+      ? `        // PostgreSQL: no local DbPath; connection comes from DATABASE_URL.`
+      : `        var folder = Environment.SpecialFolder.LocalApplicationData;
+        var path = Environment.GetFolderPath(folder);
+        DbPath = System.IO.Path.Join(path, "${appName.toLowerCase()}.db");`;
     files.push({
       path: `src/${appName}/Data/AppDbContext.cs`,
       language: "csharp",
@@ -244,24 +278,25 @@ using ${appName}.Models;
 namespace ${appName}.Data;
 
 /// <summary>
-/// EF Core DbContext for local SQLite persistence (offline-first).
-/// Connection string: "Data Source=${appName.toLowerCase()}.db".
-/// </summary>
+/// EF Core DbContext for ${usePostgres ? "PostgreSQL" : "local SQLite"} persistence ${usePostgres ? "(client/server)" : "(offline-first)"}.
+${usePostgres ? `/// Connection: reads DATABASE_URL from the environment (falls back to a local dev instance).
+` : `/// Connection string: "Data Source=${appName.toLowerCase()}.db".
+` }/// </summary>
 public class AppDbContext : DbContext
 {
     public DbSet<${entity}> ${entity}Set => Set<${entity}>();
 
-    public string DbPath { get; }
+${usePostgres ? `    // PostgreSQL mode: no local DbPath needed.` : `    public string DbPath { get; }`}
 
     public AppDbContext()
     {
-        var folder = Environment.SpecialFolder.LocalApplicationData;
-        var path = Environment.GetFolderPath(folder);
-        DbPath = System.IO.Path.Join(path, "${appName.toLowerCase()}.db");
+${ctorBody}
     }
 
     protected override void OnConfiguring(DbContextOptionsBuilder options)
-        => options.UseSqlite($"Data Source={DbPath}");
+    {
+${onConfiguringBody}
+    }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -279,7 +314,7 @@ public class AppDbContext : DbContext
   }
 
   // ---- Services/<Entity>Service.cs ----
-  if (useSqlite) {
+  if (useEfCore) {
     files.push({
       path: `src/${appName}/Services/${entity}Service.cs`,
       language: "csharp",
@@ -349,7 +384,7 @@ public class ${entity}Service
     content: `using System.Collections.ObjectModel;
 using System.Windows.Input;
 using ${appName}.Models;
-${useSqlite ? `using ${appName}.Services;\n` : ""}using CommunityToolkit.Mvvm.ComponentModel;
+${useEfCore ? `using ${appName}.Services;\n` : ""}using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
 namespace ${appName}.ViewModels;
@@ -375,7 +410,7 @@ public partial class MainViewModel : ObservableObject
 
     public MainViewModel() { }
 
-${useSqlite ? `    public MainViewModel(${entity}Service service)
+${useEfCore ? `    public MainViewModel(${entity}Service service)
     {
         _service = service;
         LoadItems();
@@ -567,7 +602,7 @@ A real WinUI 3 desktop application generated by Pavan's Desktop Generator (Anvil
 ## What's included
 - WinUI 3 + Windows App SDK 1.6 + .NET 8
 - MVVM (CommunityToolkit.Mvvm source generators)
-${useSqlite ? `- EF Core SQLite local persistence (offline-first)
+${useEfCore ? `- EF Core ${usePostgres ? "PostgreSQL (Npgsql)" : "SQLite"} ${usePostgres ? "client/server" : "local"} persistence${usePostgres ? " (reads DATABASE_URL)" : " (offline-first)"}
 - Models/${entity}.cs, Data/AppDbContext.cs, Services/${entity}Service.cs
 ` : ""}- ViewModels/MainViewModel.cs with Add/Delete commands
 - Views/MainWindow.xaml with DataGrid + add form
@@ -591,7 +626,8 @@ Generated by Pavan — Autonomous Software Creator.
   });
 
   void camel;
-  return registerFiles(files, "windows", "WinUI 3 + .NET 8" + (useSqlite ? " + EF Core SQLite" : ""), "desktop-generator", targetId, "source-code", "generate");
+  const efCoreLabel = useEfCore ? (usePostgres ? " + EF Core PostgreSQL (Npgsql)" : " + EF Core SQLite") : "";
+  return registerFiles(files, "windows", "WinUI 3 + .NET 8" + efCoreLabel, "desktop-generator", targetId, "source-code", "generate");
 }
 
 /** Generate a deterministic-looking GUID string. */
