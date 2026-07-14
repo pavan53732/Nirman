@@ -156,37 +156,9 @@ export const previewProviders: PreviewProvider[] = [
   { id: "android", name: "Android Preview", supportsHotReload: true, supportsInspector: false },
 ];
 
-// Provider Registry — provider abstraction. Real z-ai SDK is wired as the
-// remote LLM provider; embedding/speech/image/ocr/vector are abstracted.
-export const providers: Provider[] = [
-  {
-    id: "pavan-cloud",
-    name: "Pavan Cloud",
-    type: "remote",
-    status: "connected",
-    models: [
-      { id: "pavan-orion-1", name: "Pavan Orion 1", contextWindow: 200000, capabilities: ["llm"], costPer1kTokens: 0.012 },
-      { id: "pavan-embed-mini", name: "Pavan Embed Mini", contextWindow: 8000, capabilities: ["embedding"], costPer1kTokens: 0.0002 },
-      { id: "pavan-tts", name: "Pavan TTS", contextWindow: 4000, capabilities: ["speech-tts"] },
-    ],
-  },
-  {
-    id: "local-runtime",
-    name: "Local Runtime",
-    type: "local",
-    status: "connected",
-    models: [
-      { id: "qwen2.5-coder-32b", name: "Qwen2.5 Coder 32B", contextWindow: 128000, capabilities: ["llm"], costPer1kTokens: 0 },
-      { id: "local-embed", name: "Local Embeddings", contextWindow: 8000, capabilities: ["embedding"], costPer1kTokens: 0 },
-    ],
-  },
-  {
-    id: "offline-nano",
-    name: "Offline Nano",
-    type: "local",
-    status: "disconnected",
-    models: [
-      { id: "phi-3.5-mini", name: "Phi-3.5 Mini", contextWindow: 32000, capabilities: ["llm"], costPer1kTokens: 0 },
-    ],
-  },
-];
+// Provider Registry — empty by default. Populated at runtime from the AI
+// Settings store (localStorage pavan:ai-settings) which has real providers
+// (z-ai, openai, anthropic, ollama, groq, openrouter) with real Base URLs,
+// API keys, and connection statuses from /api/ai/test-connection.
+// No fake providers — those have been removed.
+export const providers: Provider[] = [];

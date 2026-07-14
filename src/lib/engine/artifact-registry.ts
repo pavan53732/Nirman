@@ -5,17 +5,24 @@
 
 import type { ArtifactRecord, ArtifactType, AgentRole, WorkflowId } from "./types";
 
-function shortHash(): string {
-  return Array.from({ length: 12 }, () =>
-    "0123456789abcdef"[Math.floor(Math.random() * 16)]
-  ).join("");
+/**
+ * Real SHA-256 hash of file content. Uses the Web Crypto API (available in
+ * both browser and Node 18+). Returns first 12 hex chars of the digest.
+ */
+async function realHash(content: string): Promise<string> {
+  const enc = new TextEncoder().encode(content);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 12);
 }
 
 export class ArtifactRegistry {
   private artifacts = new Map<string, ArtifactRecord>();
   private counter = 0;
 
-  produce(opts: {
+  async produce(opts: {
     type: ArtifactType;
     name: string;
     producedBy: AgentRole;
@@ -23,20 +30,24 @@ export class ArtifactRegistry {
     stageId: string;
     targetId?: string;
     path: string;
+    content?: string; // file content for real SHA-256 hashing
     dependencies?: string[];
     sizeLabel: string;
-  }): ArtifactRecord {
+  }): Promise<ArtifactRecord> {
     const id = `art-${++this.counter}`;
     const existing = [...this.artifacts.values()].find(
       (a) => a.name === opts.name && a.type === opts.type && a.targetId === opts.targetId
     );
     const version = existing ? existing.version + 1 : 1;
+    // Real SHA-256 hash from file content, not random hex
+    const hashContent = opts.content ?? `${opts.name}:${opts.path}:${version}`;
+    const hash = "sha256:" + await realHash(hashContent);
     const rec: ArtifactRecord = {
       id,
       type: opts.type,
       name: opts.name,
       version,
-      hash: "sha256:" + shortHash(),
+      hash,
       producedBy: opts.producedBy,
       workflowId: opts.workflowId,
       stageId: opts.stageId,

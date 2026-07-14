@@ -146,3 +146,44 @@ export const skills: Skill[] = [
   { id: "ws-code-graph", name: "Code Graph", category: "Workspace Intelligence", agent: "knowledge-base-manager", description: "Graph of code relationships." },
   { id: "ws-arch-graph", name: "Architecture Graph", category: "Workspace Intelligence", agent: "knowledge-base-manager", description: "Graph of architecture decisions and modules." },
 ];
+
+/* ---------------- Skill Categories (structural, not mock) ---------------- */
+import type { SkillCategory } from "../types";
+
+export const skillCategories: SkillCategory[] = [
+  { id: "requirements", name: "Requirements", icon: "clipboard-list", description: "Understanding and structuring what to build" },
+  { id: "architecture", name: "Architecture", icon: "drafting-compass", description: "System design and module decomposition" },
+  { id: "scaffolding", name: "Project Generation", icon: "folder-plus", description: "Scaffolding and solution generation" },
+  { id: "frontend", name: "Frontend", icon: "layout", description: "Web UI frameworks and styling" },
+  { id: "windows", name: "Windows Desktop", icon: "monitor", description: "Native & cross-platform Windows apps" },
+  { id: "android", name: "Android", icon: "smartphone", description: "Native and cross-platform mobile" },
+  { id: "backend", name: "Backend", icon: "server", description: "Server frameworks and runtimes" },
+  { id: "database", name: "Database", icon: "database", description: "Persistence and data stores" },
+  { id: "ai", name: "AI", icon: "brain-circuit", description: "LLMs, RAG, and agent orchestration" },
+  { id: "api", name: "API", icon: "webhook", description: "Interface design and protocols" },
+  { id: "packaging", name: "Build & Packaging", icon: "package", description: "Compilers, package managers, installers" },
+  { id: "testing", name: "Testing", icon: "flask-conical", description: "Verification across the pyramid" },
+  { id: "security", name: "Security", icon: "shield-check", description: "Auth, crypto, and supply-chain safety" },
+  { id: "debugging", name: "Debugging", icon: "bug", description: "Failure analysis and repair" },
+  { id: "performance", name: "Performance", icon: "gauge", description: "Profiling and optimization" },
+  { id: "devops", name: "DevOps", icon: "git-merge", description: "CI/CD and release automation" },
+  { id: "documentation", name: "Documentation", icon: "book-open", description: "Generated and maintained docs" },
+  { id: "git", name: "Git", icon: "git-branch", description: "Version control workflows" },
+  { id: "ux", name: "UX", icon: "palette", description: "UI generation, accessibility, design systems" },
+  { id: "preview", name: "Live Preview", icon: "eye", description: "Live previews and hot reload" },
+  { id: "quality", name: "Quality", icon: "sparkles", description: "Refactoring, linting, debt reduction" },
+];
+
+/* ---------------- Stage → Agent mapping (structural) ---------------- */
+import type { StageId, AgentRole } from "../types";
+
+export const stageAgentMap: Record<StageId, AgentRole[]> = {
+  analyze: ["planner", "orchestrator"],
+  plan: ["planner", "orchestrator"],
+  architect: ["architect", "selector"],
+  generate: ["coder", "reviewer"],
+  build: ["builder", "debugger"],
+  test: ["tester", "debugger"],
+  package: ["builder", "docs"],
+  ready: ["orchestrator"],
+};

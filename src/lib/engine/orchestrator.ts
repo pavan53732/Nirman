@@ -304,14 +304,17 @@ export class Orchestrator {
         level: "error",
       });
     }
-    tokenBudgetManager.charge("planner", workflow.id, ctx.tokenEstimate);
-    observability.chargeTokens("planner", ctx.tokenEstimate, workflow.id);
-    // Charge the generator agents for producing source files (token estimate
-    // based on generated file sizes — ~4 chars per token).
+    // Token charging: real tokens come from the z-ai SDK chat response
+    // (captured in use-chat.ts via usage.total_tokens). For non-LLM tasks
+    // (planner context, generator file production), tokens = 0 — no estimate.
+    // The ctx.tokenEstimate is NOT charged — it was only used for budget
+    // checking, not for observability metrics.
+    tokenBudgetManager.charge("planner", workflow.id, 0);
+    // Generator agents produce files via deterministic templates, not LLM
+    // calls — no tokens consumed. Real tokens are only from /api/chat.
     for (const g of generationResults) {
-      const genTokens = g.files.reduce((n, f) => n + Math.ceil(f.content.length / 4), 0);
-      observability.chargeTokens(g.producedBy, genTokens, workflow.id);
-      tokenBudgetManager.charge(g.producedBy, workflow.id, genTokens);
+      observability.chargeTokens(g.producedBy, 0, workflow.id);
+      tokenBudgetManager.charge(g.producedBy, workflow.id, 0);
     }
 
     // Submit to execution engine (parallel, dependency-scheduled). If the

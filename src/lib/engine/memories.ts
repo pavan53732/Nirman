@@ -145,8 +145,10 @@ export class ContextBuilder {
   ): { memorySlice: MemoryRecord[]; tokenEstimate: number } {
     const kinds = opts.kinds ?? this.defaultKindsFor(agent);
     const memorySlice = this.mem.sliceFor(agent, kinds);
-    const tokenEstimate = memorySlice.reduce((sum, r) => sum + Math.ceil(r.content.length / 4), 0) +
-      Math.ceil((opts.prompt ?? "").length / 4);
+    // No token estimate — real tokens come from the z-ai SDK usage response.
+    // For non-LLM tasks (context building), tokens = 0.
+    const tokenEstimate = 0;
+    void memorySlice; void opts;
     return { memorySlice, tokenEstimate };
   }
 

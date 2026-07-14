@@ -353,6 +353,19 @@ export class ExecutionEngine {
     }
     return out;
   }
+
+  /**
+   * Get the real duration of a stage from its tasks' startedAt/finishedAt.
+   * Returns 0 if no tasks have run for the stage.
+   */
+  getStageTiming(stageId: string): number {
+    const tasks = this.tasksForStage(stageId);
+    if (tasks.length === 0) return 0;
+    const durations = tasks
+      .filter((t) => t.startedAt && t.finishedAt)
+      .map((t) => (t.finishedAt ?? 0) - (t.startedAt ?? 0));
+    return durations.length > 0 ? Math.max(...durations) : 0;
+  }
 }
 
 /* ---------------- Checkpoint Manager ---------------- */

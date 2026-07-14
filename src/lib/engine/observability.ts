@@ -29,7 +29,7 @@ export interface WorkflowAggregate {
   lastActivityAt: number;
 }
 
-const COST_PER_1K = 0.012; // matches pavan-orion-1 in provider registry
+const COST_PER_1K = 0; // real cost comes from provider config costPer1kInput
 
 export class Observability {
   private taskHistory: { taskId: string; agent: AgentRole; stageId: string; durationMs: number; status: string; ts: number; workflowId: WorkflowId }[] = [];

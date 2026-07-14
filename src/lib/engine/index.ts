@@ -5,7 +5,7 @@
 //   -> Provider Abstraction -> Workflow Engine -> Execution Engine -> Orchestrator
 
 import { registries } from "./registries";
-import { skills } from "./data/skills";
+import { skills, skillCategories, stageAgentMap } from "./data/skills";
 import { tools } from "./data/tools";
 import { agents } from "./data/agents";
 import { platformAdapters, previewProviders, providers } from "./data/adapters";
@@ -52,6 +52,10 @@ orchestrator.bootstrap();
 
 export {
   registries,
+  skills,
+  skillCategories,
+  stageAgentMap,
+  agents,
   orchestrator,
   executionEngine,
   checkpointManager,

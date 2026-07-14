@@ -259,8 +259,9 @@ export const useApp = create<AppState>((set, get) => ({
       updated[currentIdx] = {
         ...updated[currentIdx],
         status: "done",
-        durationMs: 800 + Math.floor(Math.random() * 1600),
-        detail: stageDetails[updated[currentIdx].id]?.[0],
+        // Real duration from engine — no Math.random
+        durationMs: executionEngine.getStageTiming?.(updated[currentIdx].id) ?? 0,
+        detail: undefined, // real task output comes from engine events
       };
     }
     if (nextIdx >= 0) {

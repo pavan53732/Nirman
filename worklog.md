@@ -256,3 +256,24 @@ Work Log:
 
 Stage Summary:
 - VERIFIED: Fresh reload → "No project", no Invoicer/Pulse/TrailMate, empty state with correct placeholder, 4 chips, no Publish button. "Build app" → ambiguity score 0.80 → asks clarification in chat, status Idle, 0 files. "Build offline invoicing Windows app with billing and stock" → score 0.30 → decision rationale shown in chat ("App → Tauri + Rust (85%)") → auto-starts build → status Ready 100% → 13 files generated → header shows "Offline Invoicing Windows" (derived from prompt). Lint clean, server 200, mobile responsive at 390px, no console errors.
+
+---
+Task ID: 15
+Agent: Z.ai Code (main)
+Task: Remove ALL mock data — final cleanup. Delete MockWebApp/MockWindowsApp/MockAndroidApp, seedLogs, seedProviders, pavan-cloud, Math.random duration, shortHash, length/4 token estimate, stageDetails pre-written text.
+
+Work Log:
+- (1) Deleted MockWebApp/MockWindowsApp/MockAndroidApp from preview-panel.tsx — all hardcoded Acme Inc, Globex, $24,580, Forest Loop, bar chart heights removed. Replaced with real CodeViewer that fetches actual generated files from /api/workspace/list and displays real file contents. Empty state shows "No build yet — describe your app in chat". Created /api/workspace/list endpoint.
+- (2) Cleaned mock-data.ts: deleted seedLogs (fake "Pavan Cloud"/"pavan-orion-1" logs), seedProviders (fake prov-remote/pavan-orion-1), defaultSettings (pointing to pavan-orion-1), stageDetails (pre-written "Detected intent" strings — now empty arrays). Kept only: initialStages, starterSuggestions, makeArtifacts, seedChat (single "Describe what you want to build" message), stageOrder. All arrays empty except structural definitions.
+- (3) Removed pavan-cloud/pavan-orion-1/pavan-embed-mini/pavan-tts from adapters.ts providers array — now empty []. Comment: "Populated at runtime from AI Settings store."
+- (4) Removed Math.random() duration in store.ts advanceStage() — replaced with executionEngine.getStageTiming(stageId) which measures real task startedAt→finishedAt. Added getStageTiming() method to ExecutionEngine.
+- (5) Replaced shortHash() random hex in artifact-registry.ts with realHash() — async SHA-256 via crypto.subtle.digest. produce() is now async, computes real hash from file content.
+- (6) Removed content.length/4 token estimate in memories.ts — tokenEstimate = 0 for non-LLM tasks. Real tokens come only from z-ai SDK usage.total_tokens (captured in use-chat.ts). Removed content.length/4 from orchestrator.ts generator token charging — generators use 0 tokens (deterministic templates, not LLM).
+- (7) stageDetails now empty arrays — status panel detail comes from real ExecutionEngine task events, not pre-written strings.
+- (8) Added comment to agents.ts: "name field is display label only, not separate process."
+- (9) Fixed pavan-orion-1 references in observability.ts (COST_PER_1K = 0, real cost from provider config), adapters.ts (comment), repair/route.ts (model: "repair").
+- Moved skillCategories + stageAgentMap from mock-data.ts to engine/data/skills.ts (structural definitions, not mock). Updated engine index exports. Fixed capabilities-dialog.tsx and status-panel.tsx imports to use @/lib/engine instead of @/lib/mock-data.
+
+Stage Summary:
+- GREP VERIFICATION: pavan-orion-1 = 0, Pavan Cloud = 0, Acme Inc = 0, Forest Loop = 0, 24,580 = 0, Math.random() in store = 0, Math.random() in artifact-registry = 0, MockWebApp/MockWindowsApp/MockAndroidApp = 0, shortHash = 0, content.length/4 = 0. ALL MOCKS REMOVED.
+- Fresh load: "No project", "Describe your app idea", 4 chips, Run disabled, no Publish, no errors. "Build app" → asks clarification, status Idle, 0 files. Lint clean, server 200.

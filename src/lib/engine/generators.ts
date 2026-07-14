@@ -440,7 +440,11 @@ export function registerFiles(
 ): GenerationResult {
   const artifactIds: string[] = [];
   for (const f of files) {
-    const art = artifactRegistry.produce({
+    // Fire-and-forget async produce (real SHA-256 hash computation).
+    // The artifact is registered in the registry; the ID is assigned synchronously.
+    const artId = `art-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${f.path.length}`;
+    artifactIds.push(artId);
+    void artifactRegistry.produce({
       type,
       name: f.path,
       producedBy,
@@ -448,10 +452,10 @@ export function registerFiles(
       stageId,
       targetId,
       path: f.path,
+      content: f.content,
       dependencies: [],
       sizeLabel: `${(f.content.length / 1024).toFixed(1)} KB`,
     });
-    artifactIds.push(art.id);
   }
   // Tool Manager would invoke the packaging tool here (e.g. dotnet-build,
   // gradle-assemble, npm-build). We record the toolchain the adapter declares.

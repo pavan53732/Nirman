@@ -78,7 +78,7 @@ Return the complete corrected file content that resolves all errors above.`;
     return NextResponse.json({
       patchedContent: cleaned,
       tokensUsed: usage?.total_tokens ?? 0,
-      model: "pavan-orion-1",
+      model: "repair",
     });
   } catch (err) {
     return NextResponse.json(

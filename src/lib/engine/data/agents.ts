@@ -1,6 +1,9 @@
 import type { Agent } from "../types";
 
 // Agent Registry — 6 layers + cross-cutting + dynamic sub-agents.
+// NOTE: The "name" field (Atlas, Vitruvius, Edison, etc.) is a display label
+// only — agents are role labels for task attribution in logs and the UI, not
+// separate processes. The ExecutionEngine attributes tasks to agent roles.
 export const agents: Agent[] = [
   // Layer 1 — Executive (5, always active)
   { id: "orchestrator", role: "orchestrator", name: "Conductor", layer: "executive", icon: "network", color: "emerald", description: "Coordinates all agents and the end-to-end pipeline.", alwaysActive: true },
