@@ -30,7 +30,7 @@ export interface DesktopGenerationContext {
 }
 
 /** Map a DataField type to a C# type. */
-function csType(field: { type: string; required: boolean }): string {
+function csType(field: { type: string; required: boolean; name: string }): string {
   switch (field.type) {
     case "string":
       return field.required ? "string" : "string?";

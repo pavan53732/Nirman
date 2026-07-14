@@ -19,6 +19,8 @@ import type {
   DecisionRecord,
   Capability,
   PlatformKind,
+  AgentRole,
+  GateId,
 } from "./types";
 import { executionEngine, checkpointManager, makeTask } from "./execution-engine";
 import { workflowEngine } from "./workflow-engine";
@@ -341,7 +343,7 @@ export class Orchestrator {
   }
 
   /** Checkpoint after a stage completes (for recovery). */
-  checkpoint(stageId: StageId, workflowId: WorkflowId, snapshot: Record<string, import("./types").TaskStatus>): void {
+  checkpoint(stageId: StageId, workflowId: WorkflowId, snapshot: Record<string, string>): void {
     const cp = checkpointManager.save(stageId, workflowId, snapshot, projectMemory.version());
     observability.recordEvent({
       id: `ev-${Date.now()}-cp`,
@@ -355,7 +357,7 @@ export class Orchestrator {
   }
 
   /** Resume from the last checkpoint after a crash. */
-  resume(): { stageId: string; snapshot: Record<string, import("./types").TaskStatus> } | null {
+  resume(): { stageId: string; snapshot: Record<string, string> } | null {
     const r = checkpointManager.resume();
     if (r) {
       observability.recordEvent({

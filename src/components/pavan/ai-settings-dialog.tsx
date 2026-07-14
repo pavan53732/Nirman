@@ -469,7 +469,11 @@ function StatusDot({
     return <span className="h-2.5 w-2.5 rounded-full bg-zinc-400" title="Idle" />;
   }
   if (status === "testing") {
-    return <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" title="Testing…" />;
+    return (
+      <span title="Testing…">
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" />
+      </span>
+    );
   }
   if (status === "connected") {
     return (

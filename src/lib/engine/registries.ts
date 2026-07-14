@@ -1,6 +1,11 @@
 // Generic, plugin-ready registry. All registries support runtime registration
 // so plugins (skills, tools, agents, adapters, preview providers, providers,
 // workflows) can be added without recompiling the core.
+//
+// The registry is keyed by a string extracted from each item via the `keyOf`
+// callback passed at construction. Most entries use `id`, but `PlatformAdapter`
+// uses `kind` as its unique key — supporting both without forcing adapters to
+// add a redundant `id` field.
 
 import type {
   Skill,
@@ -11,17 +16,19 @@ import type {
   Provider,
 } from "./types";
 
-class Registry<T extends { id: string }> {
+class Registry<T> {
   private items = new Map<string, T>();
   private listeners = new Set<(items: T[]) => void>();
 
+  constructor(private readonly keyOf: (item: T) => string) {}
+
   register(item: T): void {
-    this.items.set(item.id, item);
+    this.items.set(this.keyOf(item), item);
     this.emit();
   }
 
   registerAll(items: T[]): void {
-    for (const i of items) this.items.set(i.id, i);
+    for (const i of items) this.items.set(this.keyOf(i), i);
     this.emit();
   }
 
@@ -57,12 +64,12 @@ class Registry<T extends { id: string }> {
   }
 }
 
-export const skillRegistry = new Registry<Skill>();
-export const toolRegistry = new Registry<Tool>();
-export const agentRegistry = new Registry<Agent>();
-export const platformAdapterRegistry = new Registry<PlatformAdapter>();
-export const previewProviderRegistry = new Registry<PreviewProvider>();
-export const providerRegistry = new Registry<Provider>();
+export const skillRegistry = new Registry<Skill>((s) => s.id);
+export const toolRegistry = new Registry<Tool>((t) => t.id);
+export const agentRegistry = new Registry<Agent>((a) => a.id);
+export const platformAdapterRegistry = new Registry<PlatformAdapter>((a) => a.kind);
+export const previewProviderRegistry = new Registry<PreviewProvider>((p) => p.id);
+export const providerRegistry = new Registry<Provider>((p) => p.id);
 
 // Re-export registries as a single namespace for the orchestrator.
 export const registries = {

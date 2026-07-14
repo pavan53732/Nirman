@@ -312,7 +312,15 @@ export class ExecutionEngine {
   tasksForStage(stageId: string): Task[] {
     return this.allTasks().filter((t) => t.stageId === stageId);
   }
-  stageStatus(stageId: string): TaskStatus | "pending" {
+  /**
+   * Coarse-grained stage status derived from the underlying tasks.
+   *
+   * Returns one of the UI-level `StageStatus` values (`"pending" |
+   * `"running" | "done" | "failed"`) — NOT a strict `TaskStatus`. The
+   * return type intentionally includes `"done"` and `"pending"`, which
+   * are stage-level concepts that don't exist on individual tasks.
+   */
+  stageStatus(stageId: string): TaskStatus | "pending" | "done" {
     const tasks = this.tasksForStage(stageId);
     if (tasks.length === 0) return "pending";
     if (tasks.some((t) => t.status === "running")) return "running";
@@ -375,7 +383,7 @@ export class ExecutionEngine {
 export class CheckpointManager {
   private checkpoints: import("./types").Checkpoint[] = [];
 
-  save(stageId: string, workflowId: WorkflowId, stageStatusSnapshot: Record<string, TaskStatus>, memoryVersion: number, taskId?: string): import("./types").Checkpoint {
+  save(stageId: string, workflowId: WorkflowId, stageStatusSnapshot: Record<string, string>, memoryVersion: number, taskId?: string): import("./types").Checkpoint {
     const cp: import("./types").Checkpoint = {
       id: `cp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       workflowId,
@@ -395,7 +403,7 @@ export class CheckpointManager {
         stageId: cp.stageId,
         taskId: cp.taskId,
         ts: cp.ts,
-        stageStatusSnapshot: cp.stageStatusSnapshot as Record<string, string>,
+        stageStatusSnapshot: cp.stageStatusSnapshot,
         memoryVersion: cp.memoryVersion,
       })
     );
@@ -407,7 +415,7 @@ export class CheckpointManager {
   }
 
   /** Resume from the latest checkpoint: returns the stage to resume from. */
-  resume(): { stageId: string; snapshot: Record<string, TaskStatus> } | null {
+  resume(): { stageId: string; snapshot: Record<string, string> } | null {
     const cp = this.latest();
     if (!cp) return null;
     return { stageId: cp.stageId, snapshot: cp.stageStatusSnapshot };
@@ -435,7 +443,7 @@ export class CheckpointManager {
    * repopulates the in-memory list. Returns the stage to resume from, or null
    * if nothing was persisted.
    */
-  async restoreFromIDB(workflowId?: string): Promise<{ stageId: string; snapshot: Record<string, TaskStatus> } | null> {
+  async restoreFromIDB(workflowId?: string): Promise<{ stageId: string; snapshot: Record<string, string> } | null> {
     try {
       const { idbLoadCheckpoints } = await import("./idb");
       const persisted = await idbLoadCheckpoints(workflowId);
@@ -447,7 +455,7 @@ export class CheckpointManager {
         stageId: p.stageId,
         taskId: p.taskId,
         ts: p.ts,
-        stageStatusSnapshot: p.stageStatusSnapshot as Record<string, TaskStatus>,
+        stageStatusSnapshot: p.stageStatusSnapshot,
         memoryVersion: p.memoryVersion,
       }));
       const latest = this.checkpoints[this.checkpoints.length - 1];

@@ -117,18 +117,17 @@ export function makeArtifacts(projectName: string, _kind: string, targets: Targe
   return arts;
 }
 
-// Agent skill counts (derived from the engine data, not mock)
+// Agent skill counts (derived from the engine data, not mock).
+// The engine's `Agent` type exposes `consumes?: SkillId[]` (the inverse of
+// `Skill.agent`). `engine/index.ts` already bootstraps `consumes` from the
+// skill registry at module load; we re-derive it here too so the values are
+// populated even when this module is imported before `@/lib/engine`
+// bootstraps (e.g. SSR / first paint).
 import { skills } from "./engine/data/skills";
 import { agents } from "./engine/data/agents";
 
-const agentSkillCounts: Record<string, number> = skills.reduce(
-  (acc, s) => {
-    acc[s.agent] = (acc[s.agent] ?? 0) + 1;
-    return acc;
-  },
-  {} as Record<string, number>
-);
-
 agents.forEach((a) => {
-  a.skills = agentSkillCounts[a.id] ?? 0;
+  a.consumes = skills
+    .filter((s) => s.agent === a.role)
+    .map((s) => s.id);
 });

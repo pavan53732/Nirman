@@ -32,6 +32,14 @@ export type Capability =
 /** Identifier for a registered skill (the Skill.id). */
 export type SkillId = string;
 
+/** Structural grouping for skills (Requirements, Architecture, Frontend, …). */
+export interface SkillCategory {
+  id: string;
+  name: string;
+  icon: string; // lucide icon key
+  description: string;
+}
+
 export interface Skill extends RegistryEntry {
   category: string;
   description: string;
@@ -100,6 +108,7 @@ export type AgentRole =
   | "export-manager"
   | "migration-agent"
   | "refactoring-agent"
+  | "debugger"
   // Layer 5 — Cross-cutting services
   | "project-memory-manager"
   | "knowledge-base-manager"
@@ -306,6 +315,25 @@ export interface EngineEvent {
 
 /* ---------------- Workflow Engine ---------------- */
 
+/**
+ * Pipeline stage identifiers (8 stages, mirrored from the UI's StageId in
+ * `lib/types.ts` so the engine and UI share one canonical ordering). Both
+ * directions are exported: the engine re-exports this through
+ * `lib/types.ts` so callers can import from either location.
+ */
+export type StageId =
+  | "analyze"
+  | "plan"
+  | "architect"
+  | "generate"
+  | "build"
+  | "test"
+  | "package"
+  | "ready";
+
+/** UI-level stage status (distinct from TaskStatus — coarser grained). */
+export type StageStatus = "pending" | "running" | "done" | "failed";
+
 export type WorkflowId =
   | "new-project"
   | "continue-existing"
@@ -455,7 +483,14 @@ export interface Checkpoint {
   stageId: string;
   taskId?: string;
   ts: number;
-  stageStatusSnapshot: Record<string, TaskStatus>;
+  /**
+   * Snapshot of stage statuses at the checkpoint moment. Stored as strings
+   * (not the strict TaskStatus union) because UI-derived snapshots include
+   * `"pending"` and `"done"` — values that aren't part of TaskStatus but are
+   * valid StageStatus. The looser type matches the real runtime shape and
+   * avoids brittle casts at every call site.
+   */
+  stageStatusSnapshot: Record<string, string>;
   memoryVersion: number;
 }
 

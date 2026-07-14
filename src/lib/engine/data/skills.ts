@@ -180,10 +180,10 @@ import type { StageId, AgentRole } from "../types";
 export const stageAgentMap: Record<StageId, AgentRole[]> = {
   analyze: ["planner", "orchestrator"],
   plan: ["planner", "orchestrator"],
-  architect: ["architect", "selector"],
-  generate: ["coder", "reviewer"],
-  build: ["builder", "debugger"],
-  test: ["tester", "debugger"],
-  package: ["builder", "docs"],
+  architect: ["solution-architect", "decision-engine"],
+  generate: ["frontend-generator", "code-reviewer"],
+  build: ["build-engineer", "debugger"],
+  test: ["test-generator", "debugger"],
+  package: ["packaging-engineer", "documentation-writer"],
   ready: ["orchestrator"],
 };

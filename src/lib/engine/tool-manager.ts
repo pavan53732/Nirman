@@ -95,10 +95,12 @@ function parseErrors(stdout: string, stderr: string, toolId: string): ToolError[
   // ESLint: file:line:column: message
   const eslintRe = /([^\s:]+):(\d+):(\d+):\s*(.+)/g;
   while ((m = eslintRe.exec(output)) !== null) {
-    if (!errors.some((e) => e.file === m[1] && e.line === parseInt(m[2], 10))) {
+    const file = m[1];
+    const line = parseInt(m[2], 10);
+    if (!errors.some((e) => e.file === file && e.line === line)) {
       errors.push({
-        file: m[1],
-        line: parseInt(m[2], 10),
+        file,
+        line,
         column: parseInt(m[3], 10),
         message: m[4],
       });

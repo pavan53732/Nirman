@@ -21,7 +21,15 @@ export interface DetectedTargets {
   role: string;
   stack: string;
   capabilities: Capability[];
-  policies: DecisionPolicy[];
+  /**
+   * Decision records produced by `pickStack` for this target. These are
+   * `DecisionRecord`s (the logged outcome of a decision) — NOT
+   * `DecisionPolicy`s (which are the reusable match rules). The field is
+   * named `policies` for historical reasons; consumers read `.topic`,
+   * `.chosen`, and `.confidence` off each entry, which only exist on
+   * `DecisionRecord`.
+   */
+  policies: DecisionRecord[];
 }
 
 const KEYWORDS: { cap: Capability; re: RegExp }[] = [

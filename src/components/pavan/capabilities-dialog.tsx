@@ -92,7 +92,7 @@ export function CapabilitiesDialog() {
             >
               <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
               {a.role}
-              <span className="opacity-60">·{a.skills}</span>
+              <span className="opacity-60">·{a.consumes?.length ?? 0}</span>
             </span>
           ))}
         </div>

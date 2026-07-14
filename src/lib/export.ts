@@ -5,7 +5,8 @@
 // Implementation: File System Access API (showDirectoryPicker) when available;
 // falls back to a zip download. Must work offline.
 
-import type { ProjectMeta } from "./types";
+import type { ProjectMeta, ProjectKind } from "./types";
+import type { PlatformKind } from "./engine/types";
 import { artifactRegistry, projectMemory, registries, generateForTarget, detectCapabilities, detectNonFunctionals } from "./engine";
 
 export interface ExportResult {
@@ -18,6 +19,19 @@ export interface ExportResult {
 interface VirtualFile {
   path: string;
   content: string;
+}
+
+/**
+ * ProjectKind (UI / store) is a superset of PlatformKind (engine) — it
+ * includes values like "auto", "ai-agent", "service", "sdk", "game",
+ * "automation" that have no engine adapter. Generators only know how to
+ * handle the values in PlatformKind, so we narrow at the call site. The
+ * store already casts PlatformKind → ProjectKind when ingesting detected
+ * targets; this cast restores the original narrower type for any value
+ * that the engine actually produced.
+ */
+function toPlatformKind(kind: ProjectKind): PlatformKind {
+  return kind as PlatformKind;
 }
 
 /** Assemble the virtual solution tree from project + generators + memory. */
@@ -37,7 +51,7 @@ function assembleSolution(project: ProjectMeta): VirtualFile[] {
       t.kind === "api" ? "backend" :
       t.kind === "cli" ? "cli" :
       t.kind === "library" ? "library" : "app";
-    const gen = generateForTarget(t.kind, t.stack, project.name, t.id, {
+    const gen = generateForTarget(toPlatformKind(t.kind), t.stack, project.name, t.id, {
       prompt: project.prompt,
       capabilities: caps,
       nonFunctionals: nfs,
@@ -172,7 +186,11 @@ function buildZip(files: VirtualFile[]): Blob {
     0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0,
     ...u16(files.length), ...u16(files.length), ...u32(centralSize), ...u32(centralOffset), ...u16(0),
   ]);
-  return new Blob([...chunks, ...central, end], { type: "application/zip" });
+  // Modern TS lib.dom typings don't list `Uint8Array<ArrayBufferLike>` as a
+  // `BlobPart` (only `Uint8Array<ArrayBuffer>` is). Cast through `BlobPart`
+  // to satisfy the type without changing runtime behavior — `Blob` accepts
+  // any `Uint8Array` (and any `ArrayBufferView`) at runtime.
+  return new Blob([...chunks, ...central, end] as BlobPart[], { type: "application/zip" });
 }
 
 /** Public: export the active project to a folder (or zip fallback). */

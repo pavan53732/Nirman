@@ -80,9 +80,9 @@ function inferDataModel(prompt: string): DataModel {
 }
 
 /** Detect whether auth is required. */
-function needsAuth(nonFunctionals: NonFunctional[], prompt: string): boolean {
+function needsAuth(capabilities: Capability[], prompt: string): boolean {
   return (
-    nonFunctionals.includes("auth") ||
+    capabilities.includes("auth") ||
     /\b(login|sign in|auth|account|authentication)\b/i.test(prompt)
   );
 }
@@ -107,7 +107,7 @@ export function generateNextjsApp(ctx: WebGenerationContext): GenerationResult {
   const { projectName, targetId, prompt, capabilities, nonFunctionals } = ctx;
   const id = slug(projectName);
   const model = inferDataModel(prompt);
-  const auth = needsAuth(nonFunctionals, prompt);
+  const auth = needsAuth(capabilities, prompt);
   const realtime = needsRealtime(nonFunctionals, prompt);
   const entity = model.entityName;
   const entityLower = entity.charAt(0).toLowerCase() + entity.slice(1);

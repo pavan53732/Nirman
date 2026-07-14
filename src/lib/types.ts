@@ -1,4 +1,48 @@
-// Domain types for Pavan — autonomous AI software creator
+// Domain types for Pavan — autonomous AI software creator.
+//
+// The engine (`./engine/types.ts`) is the single source of truth for shared
+// registry/pipeline types: AgentRole, StageId, StageStatus, SkillCategory,
+// Skill, Agent, Capability, PlatformKind, TaskStatus, etc. This file
+// re-exports those shared types so existing `@/lib/types` imports keep
+// working, and defines the UI-only types that don't belong in the engine
+// layer (ProjectMeta, ChatMessage, Artifact, LogLine, AISettings, …).
+
+// Import the shared types locally so they can be referenced by the UI-only
+// interfaces below (e.g. PipelineStage uses StageId + StageStatus), and
+// re-export them so existing `@/lib/types` callers see no breakage.
+import type {
+  AgentRole,
+  AgentLayer,
+  Agent,
+  StageId,
+  StageStatus,
+  SkillCategory,
+  Skill,
+  SkillId,
+  Capability,
+  PlatformKind,
+  TaskStatus,
+  GateId,
+  WorkflowId,
+} from "./engine/types";
+
+export type {
+  AgentRole,
+  AgentLayer,
+  Agent,
+  StageId,
+  StageStatus,
+  SkillCategory,
+  Skill,
+  SkillId,
+  Capability,
+  PlatformKind,
+  TaskStatus,
+  GateId,
+  WorkflowId,
+} from "./engine/types";
+
+/* ---------------- Project / UI domain ---------------- */
 
 export type ProjectKind =
   | "windows"
@@ -45,18 +89,6 @@ export interface ChatMessage {
   streaming?: boolean;
   activity?: string;
 }
-
-export type StageId =
-  | "analyze"
-  | "plan"
-  | "architect"
-  | "generate"
-  | "build"
-  | "test"
-  | "package"
-  | "ready";
-
-export type StageStatus = "pending" | "running" | "done" | "failed";
 
 export interface PipelineStage {
   id: StageId;
@@ -106,43 +138,3 @@ export interface AISettings {
 }
 
 export type PreviewTarget = "web" | "windows" | "android";
-
-/** ---- Capability domain catalog ---- */
-
-export type AgentRole =
-  | "orchestrator"
-  | "planner"
-  | "architect"
-  | "selector"
-  | "coder"
-  | "reviewer"
-  | "tester"
-  | "debugger"
-  | "builder"
-  | "docs";
-
-export interface Agent {
-  id: AgentRole;
-  name: string; // persona name, e.g. "Atlas"
-  role: string; // human label, e.g. "Planner"
-  icon: string; // lucide icon key
-  color: string; // tailwind tint token
-  description: string;
-  skills: number; // count of owned skills (derived)
-}
-
-export interface Skill {
-  id: string;
-  name: string;
-  category: string;
-  description: string;
-  agent: AgentRole; // primary owning agent
-  tags?: string[];
-}
-
-export interface SkillCategory {
-  id: string;
-  name: string;
-  icon: string; // lucide icon key
-  description: string;
-}
