@@ -1024,3 +1024,38 @@ Stage Summary:
     - Task I (agent-runtime / agent-handlers): call injectSkills(task.agent, { platform, capabilities }) when building the AgentExecutionContext.skills field. Optionally call enrichSkillsWithLoaderContent() first if running server-side and real SKILL.md content is desired.
     - Task M (orchestrator): pass detected capabilities + platform into the runtime so injectSkills can produce the right skill set.
     - To extend coverage: add new entries to SKILL_ID_TO_FOLDER as new /skills/<folder>/SKILL.md files become available, and add new entries to CAPABILITY_SKILL_MAP as capability-specific skills are identified.
+
+---
+Task ID: N (Integration Verification + Push)
+Agent: Z.ai Code (main)
+Task: Verify the integrated autonomous runtime end-to-end + push to GitHub
+
+Work Log:
+- (1) Created agent-contracts.ts with shared interfaces (SharedContext, AgentHandler, AgentExecutionContext, AgentExecutionResult, SubAgentSpec, DynamicAgent, SkillContent).
+- (2) Dispatched 5 parallel subagents (Tasks I/J/K/L/M) — all completed successfully.
+- (3) Verified all integration points with live endpoints + browser build.
+
+Stage Summary — ALL 7 REVIEWER POINTS ADDRESSED:
+
+1. AgentRuntime as execution gateway: executeTask() is the single entry point, 10 handlers registered
+2. Task Graph as central abstraction: every work unit is a Task, no direct generator calls
+3. Agent communication via SharedContext: plan -> architecture -> code:<target> -> build:<target>
+4. True parallelism: 4 Generating tasks in batch 6 (PROVEN in /api/build/trace)
+5. Dynamic sub-agents: DynamicAgentRegistry, capability-based spawn/destroy (auth->Sentinel, payments->Mint)
+6. Skill injection: SkillInjector, platform-filtered + capability-driven, real SKILL.md content loaded
+7. Memory readback: 8/8 agents receive memory slices (42 total records read)
+
+Live Endpoint Results:
+- POST /api/debug/dynamic-agents {auth,payments}: spawned=2, destroyed=2, active=0
+- GET /api/debug/skill-injection?platform=web&capabilities=auth: 7 agents, each with platform-filtered skills + next-auth
+- GET /api/debug/memory-readback: 8/8 agents with memory, 42 records total
+- /api/build/trace: 21 tasks, 17 batches, maxParallel=4, 4 Generating tasks in batch 6 (PARALLEL)
+
+Verification:
+- tsc: 0 errors
+- lint: clean
+- regression-tests.mjs: PASSED 5/5 (backward compatible)
+- Committed as 63618d4, pushed to origin/main
+
+The cohesive autonomous runtime is now wired:
+  Skills -> Decisions -> Agents -> Sub-agents -> Tools -> Memory -> Planning
