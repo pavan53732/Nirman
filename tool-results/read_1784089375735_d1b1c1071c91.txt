@@ -1,0 +1,722 @@
+     1→// Execution Engine — the runtime for all agents.
+     2→// Agents do NOT execute directly. They submit Tasks to the Execution Engine.
+     3→// The engine: Task Queue, Dependency Scheduler, Parallel Execution Manager,
+     4→// Resource Manager, Cancellation Manager, Retry Manager, Checkpoint Manager,
+     5→// Event Bus. This prevents orchestrator bottleneck.
+     6→
+     7→import type {
+     8→  Task,
+     9→  TaskStatus,
+    10→  EngineEvent,
+    11→  GateId,
+    12→  GateResult,
+    13→  WorkflowId,
+    14→  AgentRole,
+    15→} from "./types";
+    16→import { evaluateGate, selfHealController, SELF_HEAL_LEVELS } from "./self-healing";
+    17→import type { SelfHealLevel } from "./types";
+    18→
+    19→type EventListener = (e: EngineEvent) => void;
+    20→
+    21→export interface ExecutionEngineOptions {
+    22→  maxParallel: number;
+    23→  onTaskDone?: (task: Task) => void;
+    24→}
+    25→
+    26→/* ---------------- Build Trace Recorder ---------------- */
+    27→//
+    28→// Records a per-task runtime trace that PROVES the ExecutionEngine actually
+    29→// performs parallel scheduling, dependency resolution, and deterministic
+    30→// completion ordering at runtime. Each task gets one TraceEntry with:
+    31→//   - scheduledAt: ts when submit()/submitAll() registered the task
+    32→//   - startedAt:   ts when the executor actually picked it up
+    33→//   - completedAt: ts when complete() finished (success or failure)
+    34→//   - parallelBatch: wave number — increments when the scheduler dispatches
+    35→//     2+ tasks in the same trySchedule() tick OR after a >50ms gap (which
+    36→//     indicates the previous wave's async work finished and a new wave is
+    37→//     starting). Tasks in the same batch are the ones that ran in parallel.
+    38→//
+    39→// The trace is exposed via executionEngine.getTrace() and the
+    40→// /api/build/trace HTTP endpoint for runtime inspection.
+    41→
+    42→export interface TraceEntry {
+    43→  taskId: string;
+    44→  taskTitle: string;
+    45→  agent: string; // task.agent
+    46→  stageId: string;
+    47→  dependsOn: string[]; // task.dependsOn at scheduling time
+    48→  scheduledAt: number; // ms timestamp when submit()/submitAll() was called
+    49→  startedAt: number | null; // when executor actually picked it up
+    50→  completedAt: number | null;
+    51→  status: "pending" | "running" | "completed" | "failed";
+    52→  parallelBatch: number; // 1, 2, 3... — wave number (see above)
+    53→}
+    54→
+    55→export class BuildTrace {
+    56→  private entries = new Map<string, TraceEntry>();
+    57→  private currentBatch = 0;
+    58→  private lastDispatchTs = 0;
+    59→  // 50ms gap between scheduler dispatches is treated as a wave boundary —
+    60→  // short enough that synchronous submitAll() bursts stay in one batch,
+    61→  // long enough that real async tool completions (which take ≥1 tick) start
+    62→  // a new batch when they unblock dependent tasks.
+    63→  private static readonly WAVE_GAP_MS = 50;
+    64→
+    65→  /** Record that a task was scheduled (called from submit()). */
+    66→  recordScheduled(task: Task): void {
+    67→    if (this.entries.has(task.id)) return;
+    68→    this.entries.set(task.id, {
+    69→      taskId: task.id,
+    70→      taskTitle: task.title,
+    71→      agent: task.agent,
+    72→      stageId: task.stageId,
+    73→      dependsOn: [...task.dependsOn],
+    74→      scheduledAt: Date.now(),
+    75→      startedAt: null,
+    76→      completedAt: null,
+    77→      status: "pending",
+    78→      parallelBatch: 0, // assigned when the task actually starts
+    79→    });
+    80→  }
+    81→
+    82→  /**
+    83→   * Decide the parallelBatch number for a new scheduler wave.
+    84→   * Called ONCE per trySchedule() call that actually dispatches ≥1 task.
+    85→   * `tasks` = the tasks about to start in this tick (used to detect new
+    86→   * waves triggered by synchronous in-memory completions, where the time
+    87→   * gap is 0ms but a dep that just completed proves a wave boundary).
+    88→   * Returns the batch number to assign to all of them.
+    89→   */
+    90→  nextBatch(tasks: Task[]): number {
+    91→    const now = Date.now();
+    92→    const gap = now - this.lastDispatchTs;
+    93→    // New wave when:
+    94→    //   - first ever dispatch (currentBatch === 0)
+    95→    //   - 2+ tasks dispatched in the same scheduler tick (true parallel batch)
+    96→    //   - significant time gap since the previous dispatch (>50ms) — previous
+    97→    //     wave's async work finished and a new wave is starting
+    98→    //   - any task being dispatched has a dependency that completed in the
+    99→    //     CURRENT batch — proves a synchronous in-memory cascade where a
+   100→    //     dep finished and its dependent is now starting (a new wave even
+   101→    //     though Date.now() hasn't advanced)
+   102→    const hasDepInCurrentBatch = tasks.some((t) =>
+   103→      t.dependsOn.some((depId) => {
+   104→        const dep = this.entries.get(depId);
+   105→        return (
+   106→          !!dep &&
+   107→          dep.parallelBatch === this.currentBatch &&
+   108→          dep.status === "completed"
+   109→        );
+   110→      })
+   111→    );
+   112→    const isNewWave =
+   113→      this.currentBatch === 0 ||
+   114→      tasks.length >= 2 ||
+   115→      gap > BuildTrace.WAVE_GAP_MS ||
+   116→      hasDepInCurrentBatch;
+   117→    if (isNewWave) {
+   118→      this.currentBatch++;
+   119→    }
+   120→    this.lastDispatchTs = now;
+   121→    return this.currentBatch;
+   122→  }
+   123→
+   124→  /** Record that a task transitioned to running. */
+   125→  recordStarted(task: Task, batch: number): void {
+   126→    const e = this.entries.get(task.id);
+   127→    if (!e) return;
+   128→    e.startedAt = Date.now();
+   129→    e.status = "running";
+   130→    e.parallelBatch = batch;
+   131→  }
+   132→
+   133→  /** Record that a task finished (success or failure). */
+   134→  recordCompleted(task: Task, status: "completed" | "failed"): void {
+   135→    const e = this.entries.get(task.id);
+   136→    if (!e) return;
+   137→    e.completedAt = Date.now();
+   138→    e.status = status;
+   139→  }
+   140→
+   141→  /** Full trace sorted by scheduledAt then startedAt (stable, deterministic). */
+   142→  getTrace(): TraceEntry[] {
+   143→    return [...this.entries.values()].sort((a, b) => {
+   144→      if (a.scheduledAt !== b.scheduledAt) return a.scheduledAt - b.scheduledAt;
+   145→      const as = a.startedAt ?? 0;
+   146→      const bs = b.startedAt ?? 0;
+   147→      if (as !== bs) return as - bs;
+   148→      return a.taskId.localeCompare(b.taskId);
+   149→    });
+   150→  }
+   151→
+   152→  /** Reset the trace (called from ExecutionEngine.reset()). */
+   153→  clear(): void {
+   154→    this.entries.clear();
+   155→    this.currentBatch = 0;
+   156→    this.lastDispatchTs = 0;
+   157→  }
+   158→}
+   159→
+   160→export class ExecutionEngine {
+   161→  private tasks = new Map<string, Task>();
+   162→  private queue: string[] = []; // task ids ready/queued
+   163→  private running = new Set<string>();
+   164→  private listeners = new Set<EventListener>();
+   165→  private timers = new Map<string, ReturnType<typeof setTimeout>>();
+   166→  private maxParallel: number;
+   167→  private onTaskDone?: (task: Task) => void;
+   168→  private cancelled = false;
+   169→  private eventCounter = 0;
+   170→  private trace = new BuildTrace();
+   171→
+   172→  constructor(opts: ExecutionEngineOptions = { maxParallel: 4 }) {
+   173→    this.maxParallel = opts.maxParallel;
+   174→    this.onTaskDone = opts.onTaskDone;
+   175→  }
+   176→
+   177→  /* ---------------- Event Bus ---------------- */
+   178→  subscribe(fn: EventListener): () => void {
+   179→    this.listeners.add(fn);
+   180→    return () => this.listeners.delete(fn);
+   181→  }
+   182→  private emit(partial: Omit<EngineEvent, "id" | "ts">): void {
+   183→    const e: EngineEvent = { id: `ev-${++this.eventCounter}`, ts: Date.now(), ...partial };
+   184→    this.listeners.forEach((fn) => fn(e));
+   185→  }
+   186→
+   187→  /* ---------------- Task Queue + Dependency Scheduler ---------------- */
+   188→  submit(task: Task): void {
+   189→    this.tasks.set(task.id, task);
+   190→    // Record the task in the build trace BEFORE any scheduling — this captures
+   191→    // the scheduledAt timestamp at the moment the task entered the engine.
+   192→    this.trace.recordScheduled(task);
+   193→    task.status = task.dependsOn.length === 0 ? "ready" : "queued";
+   194→    this.emit({ type: "task-queued", taskId: task.id, workflowId: task.workflowId, message: `Queued: ${task.title}`, level: "debug" });
+   195→    this.trySchedule();
+   196→  }
+   197→
+   198→  submitAll(tasks: Task[]): void {
+   199→    for (const t of tasks) this.submit(t);
+   200→  }
+   201→
+   202→  /**
+   203→   * Insert a task into a RUNNING graph. Used by the Verification Loop (Wave
+   204→   * 1C, future) to add fix tasks when verification fails. The task is
+   205→   * scheduled immediately if its dependencies are satisfied.
+   206→   *
+   207→   * This is the V2 dynamic task insertion capability — distinct from the
+   208→   * initial `submitAll()` bulk-load because it happens DURING execution,
+   209→   * after the engine has already begun dispatching other tasks. Operationally
+   210→   * it delegates to `submit()` (which registers the task in `this.tasks`,
+   211→   * records `scheduledAt` in the trace, assigns the initial status, emits a
+   212→   * `task-queued` event, and calls `trySchedule()` so the task is picked up
+   213→   * immediately if its dependencies are satisfied), then emits an additional
+   214→   * observability event so subscribers can distinguish insertions from the
+   215→   * initial graph.
+   216→   *
+   217→   * Backward compat: this method is additive — `submitAll()` and `submit()`
+   218→   * are unchanged. Existing callers continue to work as before.
+   219→   */
+   220→  insertTask(task: Task): void {
+   221→    // submit() handles: tasks.set, trace.recordScheduled, status assignment,
+   222→    // task-queued emit, and trySchedule(). No need to duplicate that logic.
+   223→    this.submit(task);
+   224→    // Additional observability marker: this task was dynamically inserted
+   225→    // into a running graph, not part of the initial submitAll() batch.
+   226→    this.emit({
+   227→      type: "task-queued",
+   228→      taskId: task.id,
+   229→      stageId: task.stageId,
+   230→      workflowId: task.workflowId,
+   231→      message: `Inserted into running graph: ${task.title}`,
+   232→      level: "info",
+   233→    });
+   234→  }
+   235→
+   236→  private trySchedule(): void {
+   237→    if (this.cancelled) {
+   238→      this.emit({ type: "task-failed", message: `trySchedule: cancelled=true, skipping`, level: "debug" });
+   239→      return;
+   240→    }
+   241→    // Promote queued tasks whose dependencies are satisfied
+   242→    let promoted = 0;
+   243→    for (const t of this.tasks.values()) {
+   244→      if (t.status === "queued" && this.depsSatisfied(t)) {
+   245→        t.status = "ready";
+   246→        promoted++;
+   247→      }
+   248→    }
+   249→    // Collect ready tasks up to the parallelism limit. We snapshot the
+   250→    // dispatch list BEFORE calling start() so that all tasks dispatched in
+   251→    // this scheduler tick can be tagged with the same parallelBatch number.
+   252→    const ready = [...this.tasks.values()].filter((t) => t.status === "ready");
+   253→    const toDispatch: Task[] = [];
+   254→    for (const t of ready) {
+   255→      if (this.running.size + toDispatch.length >= this.maxParallel) break;
+   256→      toDispatch.push(t);
+   257→    }
+   258→    if (toDispatch.length > 0) {
+   259→      const batch = this.trace.nextBatch(toDispatch);
+   260→      for (const t of toDispatch) {
+   261→        this.start(t, batch);
+   262→      }
+   263→    }
+   264→    if (promoted > 0 || ready.length > 0) {
+   265→      this.emit({ type: "task-queued", message: `trySchedule: promoted ${promoted}, started ${toDispatch.length}, running=${this.running.size}`, level: "debug" });
+   266→    }
+   267→  }
+   268→
+   269→  private depsSatisfied(t: Task): boolean {
+   270→    return t.dependsOn.every((depId) => {
+   271→      const dep = this.tasks.get(depId);
+   272→      return dep && (dep.status === "succeeded" || dep.status === "skipped");
+   273→    });
+   274→  }
+   275→
+   276→  /* ---------------- Parallel Execution Manager ---------------- */
+   277→  // REAL execution: no setTimeout. Tasks either invoke a real tool (via the
+   278→  // server-side ToolManager through the client bridge) or, for non-tool tasks,
+   279→  // complete immediately with a real measured duration. Gate tasks run real
+   280→  // tsc/eslint and self-heal via the LLM repair API on failure.
+   281→  private start(task: Task, batch: number): void {
+   282→    task.status = "running";
+   283→    task.startedAt = Date.now();
+   284→    this.running.add(task.id);
+   285→    // Record the start (with the wave's parallelBatch number) AFTER the
+   286→    // task is marked running but BEFORE the task-started event fires, so
+   287→    // any subscriber that reads getTrace() sees the running state.
+   288→    this.trace.recordStarted(task, batch);
+   289→    this.emit({ type: "task-started", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `Started: ${task.title}`, level: "info" });
+   290→
+   291→    // Fire-and-forget async completion. The duration is measured from real
+   292→    // tool execution (or ~0ms for in-memory tasks), NOT a fake timeout.
+   293→    void this.complete(task);
+   294→  }
+   295→
+   296→  private async complete(task: Task): Promise<void> {
+   297→    if (this.cancelled) return;
+   298→    this.running.delete(task.id);
+   299→    task.finishedAt = Date.now();
+   300→    task.durationMs = task.finishedAt - (task.startedAt ?? task.finishedAt);
+   301→
+   302→    // If the task has a toolId, invoke the real tool now.
+   303→    if (task.toolId && !task.gate) {
+   304→      try {
+   305→        const { invokeToolClient } = await import("./tool-client");
+   306→        const cwd = (task as Task & { args?: { cwd?: string } }).args?.cwd;
+   307→        const result = await invokeToolClient(task.toolId, cwd ? { cwd } : {});
+   308→        task.result = result.success ? "ok" : `exit ${result.exitCode}`;
+   309→        if (!result.success) {
+   310→          task.status = "failed";
+   311→          this.trace.recordCompleted(task, "failed");
+   312→          this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `${task.title} failed (exit ${result.exitCode}): ${result.stderr.slice(0, 200)}`, level: "error" });
+   313→          this.trySchedule();
+   314→          return;
+   315→        }
+   316→        this.emit({ type: "task-succeeded", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `${task.title} done in ${result.durationMs}ms (real tool run)`, level: "success" });
+   317→      } catch (err) {
+   318→        task.status = "failed";
+   319→        this.trace.recordCompleted(task, "failed");
+   320→        this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `${task.title} tool error: ${String(err)}`, level: "error" });
+   321→        this.trySchedule();
+   322→        return;
+   323→      }
+   324→    }
+   325→
+   326→    // Quality gate evaluation (if this task is a gate)
+   327→    if (task.gate) {
+   328→      const gateCtx = (task as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext ?? {};
+   329→      const result = await this.runGateWithHealing(task, gateCtx);
+   330→      if (!result.passed) {
+   331→        task.status = "failed";
+   332→        this.trace.recordCompleted(task, "failed");
+   333→        this.emit({ type: "task-failed", taskId: task.id, stageId: task.stageId, message: `Gate failed: ${task.gate} — ${result.detail}`, level: "warn" });
+   334→        this.trySchedule();
+   335→        return;
+   336→      }
+   337→      this.emit({ type: "gate-evaluated", taskId: task.id, stageId: task.stageId, message: `Gate passed: ${task.gate} (${result.metric})`, level: "success" });
+   338→    }
+   339→
+   340→    task.status = "succeeded";
+   341→    if (!task.result) task.result = "ok";
+   342→    this.trace.recordCompleted(task, "completed");
+   343→    this.emit({ type: "task-succeeded", taskId: task.id, stageId: task.stageId, workflowId: task.workflowId, message: `Done: ${task.title} (${task.durationMs}ms)`, level: "success" });
+   344→    this.onTaskDone?.(task);
+   345→    this.trySchedule();
+   346→  }
+   347→
+   348→  /* ---------------- Retry Manager + Self-healing ---------------- */
+   349→  // REAL self-healing: on gate failure, escalate through levels. For
+   350→  // compilation/lint failures, call the LLM repair API (/api/repair) which
+   351→  // returns a patched file, write it to the workspace via /api/workspace,
+   352→  // then re-run the gate. No forced pass — if healing is exhausted, the
+   353→  // gate genuinely fails.
+   354→  private async runGateWithHealing(
+   355→    task: Task,
+   356→    ctx: import("./self-healing").GateEvaluationContext
+   357→  ): Promise<GateResult> {
+   358→    let result = await evaluateGate(task.gate!, ctx);
+   359→    if (result.passed) return result;
+   360→
+   361→    let level: SelfHealLevel = "fastfix";
+   362→    let attempts = 0;
+   363→    const maxAttempts = 3;
+   364→    while (attempts < maxAttempts) {
+   365→      attempts++;
+   366→      const next = selfHealController.nextLevel(task.id, level);
+   367→      if (!next) break;
+   368→      level = next;
+   369→      this.emit({ type: "task-retried", taskId: task.id, message: `Self-heal @ ${SELF_HEAL_LEVELS.find((l) => l.id === level)?.label}`, level: "warn" });
+   370→
+   371→      // For compilation failures with a workspace, attempt an LLM repair.
+   372→      if (task.gate === "compilation" && ctx.workspacePath && level !== "human-question") {
+   373→        const repaired = await this.attemptLLMRepair(ctx.workspacePath);
+   374→        if (repaired) {
+   375→          // Diff already logged to Build Memory in attemptLLMRepair
+   376→          void repaired.diff;
+   377→        }
+   378→      }
+   379→
+   380→      const retry = await evaluateGate(task.gate!, ctx);
+   381→      if (retry.passed) {
+   382→        return retry;
+   383→      }
+   384→      result = retry;
+   385→    }
+   386→    // Healing exhausted — genuinely fail (no force-pass).
+   387→    return {
+   388→      gate: task.gate!,
+   389→      passed: false,
+   390→      detail: `${task.gate} failed after ${attempts} self-heal attempts: ${result.detail}`,
+   391→      metric: result.metric ?? "failed",
+   392→    };
+   393→  }
+   394→
+   395→  /** Attempt to repair compilation errors via the LLM repair API.
+   396→   *  Reads the failing file, calls /api/repair, writes the patched content
+   397→   *  back to the workspace, and logs the diff to Build Memory. */
+   398→  private async attemptLLMRepair(workspacePath: string): Promise<{ file: string; diff: string } | null> {
+   399→    try {
+   400→      // Re-run tsc to get fresh errors
+   401→      const { invokeToolClient } = await import("./tool-client");
+   402→      const tscResult = await invokeToolClient("tsc-no-emit", { cwd: workspacePath });
+   403→      if (tscResult.success || !tscResult.errors?.length) return null;
+   404→
+   405→      // Take the first error's file, read it, repair it, write it back.
+   406→      const firstError = tscResult.errors[0];
+   407→      const fileRes = await fetch(`/api/workspace?path=${encodeURIComponent(workspacePath)}&file=${encodeURIComponent(firstError.file)}`);
+   408→      if (!fileRes.ok) return null;
+   409→      const { content: originalContent } = await fileRes.json();
+   410→
+   411→      const repairRes = await fetch("/api/repair", {
+   412→        method: "POST",
+   413→        headers: { "Content-Type": "application/json" },
+   414→        body: JSON.stringify({
+   415→          filePath: firstError.file,
+   416→          fileContent: originalContent,
+   417→          errors: tscResult.errors,
+   418→          language: "typescript",
+   419→        }),
+   420→      });
+   421→      if (!repairRes.ok) return null;
+   422→      const { patchedContent, tokensUsed } = await repairRes.json();
+   423→
+   424→      // Write the patched file back to the workspace
+   425→      const writeRes = await fetch("/api/workspace", {
+   426→        method: "PATCH",
+   427→        headers: { "Content-Type": "application/json" },
+   428→        body: JSON.stringify({ path: workspacePath, file: firstError.file, content: patchedContent }),
+   429→      });
+   430→      if (!writeRes.ok) return null;
+   431→
+   432→      // Compute a simple diff for observability + Build Memory
+   433→      const origLines = originalContent.split("\n");
+   434→      const newLines = patchedContent.split("\n");
+   435→      const diffParts: string[] = [];
+   436→      const maxLines = Math.max(origLines.length, newLines.length);
+   437→      for (let i = 0; i < maxLines; i++) {
+   438→        if (origLines[i] !== newLines[i]) {
+   439→          if (origLines[i] !== undefined) diffParts.push(`- L${i + 1}: ${origLines[i]}`);
+   440→          if (newLines[i] !== undefined) diffParts.push(`+ L${i + 1}: ${newLines[i]}`);
+   441→        }
+   442→      }
+   443→      const diff = diffParts.join("\n").slice(0, 2000); // cap at 2KB
+   444→
+   445→      // Log the diff to Build Memory via the MemoryAccess facade.
+   446→      // (Runtime V2 Audit, Phase 2 Step 6 — internal modules must not
+   447→      // touch `projectMemory` directly; they go through `memoryAccess`.)
+   448→      const { memoryAccess } = await import("./memories");
+   449→      memoryAccess.write(
+   450→        "build",
+   451→        `Repair diff: ${firstError.file}`,
+   452→        JSON.stringify({
+   453→          file: firstError.file,
+   454→          errors: tscResult.errors.slice(0, 5).map((e) => ({ line: e.line, message: e.message })),
+   455→          diff,
+   456→          repairedAt: new Date().toISOString(),
+   457→        }, null, 2),
+   458→        "debugger"
+   459→      );
+   460→
+   461→      // Emit an event for the UI/logs
+   462→      this.emit({
+   463→        type: "task-retried",
+   464→        message: `Self-heal: patched ${firstError.file} (${diffParts.length} lines changed)`,
+   465→        level: "info",
+   466→      });
+   467→
+   468→      // Charge real tokens from the repair LLM call
+   469→      const { observability } = await import("./observability");
+   470→      observability.chargeTokens("debugger" as AgentRole, tokensUsed ?? 0, "new-project");
+   471→
+   472→      return { file: firstError.file, diff };
+   473→    } catch {
+   474→      return null;
+   475→    }
+   476→  }
+   477→
+   478→  /* ---------------- Cancellation Manager ---------------- */
+   479→  cancelAll(): void {
+   480→    this.cancelled = true;
+   481→    for (const timer of this.timers.values()) clearTimeout(timer);
+   482→    this.timers.clear();
+   483→    for (const t of this.tasks.values()) {
+   484→      if (t.status === "running" || t.status === "ready" || t.status === "queued") {
+   485→        // Mark any in-flight task as failed in the trace so the runtime
+   486→        // record reflects that it did not complete.
+   487→        if (t.status === "running") this.trace.recordCompleted(t, "failed");
+   488→        t.status = "cancelled";
+   489→      }
+   490→    }
+   491→    this.running.clear();
+   492→  }
+   493→
+   494→  reset(): void {
+   495→    this.cancelAll();
+   496→    this.cancelled = false;
+   497→    this.tasks.clear();
+   498→    this.queue = [];
+   499→    this.running.clear();
+   500→    this.trace.clear();
+   501→  }
+   502→
+   503→  /* ---------------- Introspection ---------------- */
+   504→  /**
+   505→   * Runtime task-graph trace: one TraceEntry per task with scheduledAt,
+   506→   * startedAt, completedAt, status, and parallelBatch (wave number). Used to
+   507→   * PROVE parallel scheduling, dependency resolution, and completion ordering
+   508→   * actually happen at runtime. Exposed via /api/build/trace.
+   509→   */
+   510→  getTrace(): TraceEntry[] {
+   511→    return this.trace.getTrace();
+   512→  }
+   513→
+   514→  allTasks(): Task[] {
+   515→    return [...this.tasks.values()];
+   516→  }
+   517→  tasksForStage(stageId: string): Task[] {
+   518→    return this.allTasks().filter((t) => t.stageId === stageId);
+   519→  }
+   520→  /**
+   521→   * Coarse-grained stage status derived from the underlying tasks.
+   522→   *
+   523→   * Returns one of the UI-level `StageStatus` values (`"pending" |
+   524→   * `"running" | "done" | "failed"`) — NOT a strict `TaskStatus`. The
+   525→   * return type intentionally includes `"done"` and `"pending"`, which
+   526→   * are stage-level concepts that don't exist on individual tasks.
+   527→   */
+   528→  stageStatus(stageId: string): TaskStatus | "pending" | "done" {
+   529→    const tasks = this.tasksForStage(stageId);
+   530→    if (tasks.length === 0) return "pending";
+   531→    if (tasks.some((t) => t.status === "running")) return "running";
+   532→    if (tasks.every((t) => t.status === "succeeded" || t.status === "skipped")) return "done";
+   533→    if (tasks.some((t) => t.status === "failed" && t.retryLevel === undefined)) return "failed";
+   534→    if (tasks.some((t) => t.status === "ready" || t.status === "queued")) return "running";
+   535→    return "running";
+   536→  }
+   537→  isIdle(): boolean {
+   538→    return this.running.size === 0 && ![...this.tasks.values()].some((t) => t.status === "ready" || t.status === "queued");
+   539→  }
+   540→
+   541→  /**
+   542→   * Compute progress as { completed, total, percent } from real task states.
+   543→   * Used by the UI to drive the progress bar — no timers, no fake counts.
+   544→   */
+   545→  getProgress(): { completed: number; total: number; percent: number } {
+   546→    const all = this.allTasks();
+   547→    const total = all.length;
+   548→    const completed = all.filter((t) => t.status === "succeeded" || t.status === "skipped").length;
+   549→    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+   550→    return { completed, total, percent };
+   551→  }
+   552→
+   553→  /**
+   554→   * Derive the UI stage status for all 8 pipeline stages from real task states.
+   555→   * Returns a map stageId → "pending" | "running" | "done" | "failed".
+   556→   */
+   557→  getStageStatuses(): Record<string, "pending" | "running" | "done" | "failed"> {
+   558→    const out: Record<string, "pending" | "running" | "done" | "failed"> = {};
+   559→    const stageIds = ["analyze", "plan", "architect", "generate", "build", "test", "package", "ready"];
+   560→    for (const sid of stageIds) {
+   561→      const s = this.stageStatus(sid);
+   562→      if (s === "done") out[sid] = "done";
+   563→      else if (s === "running") out[sid] = "running";
+   564→      else if (s === "failed") out[sid] = "failed";
+   565→      else out[sid] = "pending";
+   566→    }
+   567→    return out;
+   568→  }
+   569→
+   570→  /**
+   571→   * Get the real duration of a stage from its tasks' startedAt/finishedAt.
+   572→   * Returns 0 if no tasks have run for the stage.
+   573→   */
+   574→  getStageTiming(stageId: string): number {
+   575→    const tasks = this.tasksForStage(stageId);
+   576→    if (tasks.length === 0) return 0;
+   577→    const durations = tasks
+   578→      .filter((t) => t.startedAt && t.finishedAt)
+   579→      .map((t) => (t.finishedAt ?? 0) - (t.startedAt ?? 0));
+   580→    return durations.length > 0 ? Math.max(...durations) : 0;
+   581→  }
+   582→}
+   583→
+   584→/* ---------------- Checkpoint Manager ---------------- */
+   585→// Persists checkpoints to IndexedDB (async, large-capacity) so resume-after-
+   586→// crash works for long multi-target builds. Keeps an in-memory copy for
+   587→// synchronous access; IndexedDB is the durable store.
+   588→export class CheckpointManager {
+   589→  private checkpoints: import("./types").Checkpoint[] = [];
+   590→
+   591→  save(stageId: string, workflowId: WorkflowId, stageStatusSnapshot: Record<string, string>, memoryVersion: number, taskId?: string): import("./types").Checkpoint {
+   592→    const cp: import("./types").Checkpoint = {
+   593→      id: `cp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+   594→      workflowId,
+   595→      stageId,
+   596→      taskId,
+   597→      ts: Date.now(),
+   598→      stageStatusSnapshot,
+   599→      memoryVersion,
+   600→    };
+   601→    this.checkpoints.push(cp);
+   602→    // Persist to IndexedDB asynchronously (fire-and-forget; IDB is the durable
+   603→    // store that survives crashes/reloads, unlike the in-memory copy).
+   604→    void import("./idb").then(({ idbSaveCheckpoint }) =>
+   605→      idbSaveCheckpoint({
+   606→        id: cp.id,
+   607→        workflowId: cp.workflowId,
+   608→        stageId: cp.stageId,
+   609→        taskId: cp.taskId,
+   610→        ts: cp.ts,
+   611→        stageStatusSnapshot: cp.stageStatusSnapshot,
+   612→        memoryVersion: cp.memoryVersion,
+   613→      })
+   614→    );
+   615→    return cp;
+   616→  }
+   617→
+   618→  latest(): import("./types").Checkpoint | undefined {
+   619→    return this.checkpoints[this.checkpoints.length - 1];
+   620→  }
+   621→
+   622→  /** Resume from the latest checkpoint: returns the stage to resume from. */
+   623→  resume(): { stageId: string; snapshot: Record<string, string> } | null {
+   624→    const cp = this.latest();
+   625→    if (!cp) return null;
+   626→    return { stageId: cp.stageId, snapshot: cp.stageStatusSnapshot };
+   627→  }
+   628→
+   629→  all(): import("./types").Checkpoint[] {
+   630→    return [...this.checkpoints];
+   631→  }
+   632→
+   633→  rollbackToLastGood(): import("./types").Checkpoint | undefined {
+   634→    // find the last checkpoint where all stages were succeeded/pending
+   635→    for (let i = this.checkpoints.length - 1; i >= 0; i--) {
+   636→      const cp = this.checkpoints[i];
+   637→      const allOk = Object.values(cp.stageStatusSnapshot).every(
+   638→        (s) => s === "succeeded" || s === "pending"
+   639→      );
+   640→      if (allOk) return cp;
+   641→    }
+   642→    return this.checkpoints[0];
+   643→  }
+   644→
+   645→  /**
+   646→   * Restore from IndexedDB after a crash/reload. Loads the latest persisted
+   647→   * checkpoint for the given workflow (or any workflow if omitted) and
+   648→   * repopulates the in-memory list. Returns the stage to resume from, or null
+   649→   * if nothing was persisted.
+   650→   */
+   651→  async restoreFromIDB(workflowId?: string): Promise<{ stageId: string; snapshot: Record<string, string> } | null> {
+   652→    try {
+   653→      const { idbLoadCheckpoints } = await import("./idb");
+   654→      const persisted = await idbLoadCheckpoints(workflowId);
+   655→      if (persisted.length === 0) return null;
+   656→      // Repopulate in-memory checkpoints
+   657→      this.checkpoints = persisted.map((p) => ({
+   658→        id: p.id,
+   659→        workflowId: p.workflowId as WorkflowId,
+   660→        stageId: p.stageId,
+   661→        taskId: p.taskId,
+   662→        ts: p.ts,
+   663→        stageStatusSnapshot: p.stageStatusSnapshot,
+   664→        memoryVersion: p.memoryVersion,
+   665→      }));
+   666→      const latest = this.checkpoints[this.checkpoints.length - 1];
+   667→      return { stageId: latest.stageId, snapshot: latest.stageStatusSnapshot };
+   668→    } catch {
+   669→      return null;
+   670→    }
+   671→  }
+   672→
+   673→  /** Check whether any checkpoints are persisted in IndexedDB. */
+   674→  async hasPersistedState(workflowId?: string): Promise<boolean> {
+   675→    try {
+   676→      const { idbLoadCheckpoints } = await import("./idb");
+   677→      const persisted = await idbLoadCheckpoints(workflowId);
+   678→      return persisted.length > 0;
+   679→    } catch {
+   680→      return false;
+   681→    }
+   682→  }
+   683→
+   684→  clear(): void {
+   685→    this.checkpoints = [];
+   686→    // Also clear persisted state so a fresh build doesn't resume stale data.
+   687→    void import("./idb").then(({ idbClearCheckpoints }) => idbClearCheckpoints());
+   688→  }
+   689→}
+   690→
+   691→export const executionEngine = new ExecutionEngine({ maxParallel: 4 });
+   692→export const checkpointManager = new CheckpointManager();
+   693→
+   694→/* ---------------- Task factory ---------------- */
+   695→let taskCounter = 0;
+   696→export function makeTask(opts: {
+   697→  workflowId: WorkflowId;
+   698→  stageId: string;
+   699→  title: string;
+   700→  description: string;
+   701→  agent: AgentRole;
+   702→  toolId?: string;
+   703→  dependsOn?: string[];
+   704→  durationMs?: number;
+   705→  gate?: GateId;
+   706→}): Task {
+   707→  return {
+   708→    id: `task-${++taskCounter}`,
+   709→    workflowId: opts.workflowId,
+   710→    stageId: opts.stageId,
+   711→    title: opts.title,
+   712→    description: opts.description,
+   713→    agent: opts.agent,
+   714→    toolId: opts.toolId,
+   715→    dependsOn: opts.dependsOn ? [...opts.dependsOn] : [],
+   716→    status: "queued",
+   717→    // durationMs is measured at runtime from real tool execution (startedAt→finishedAt).
+   718→    // No fake random duration — default 0 until the task actually runs.
+   719→    durationMs: opts.durationMs ?? 0,
+   720→  };
+   721→}
+   722→

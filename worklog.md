@@ -2367,3 +2367,136 @@ Architecture transformation achieved:
   NEW: Thin Orchestrator (383 lines) → WorkflowEngine → TaskGraph (mutable DAG) → ExecutionEngine → AgentRuntime → Agent Teams → Skills+Tools → Sandbox → VerificationLoop → ArtifactStore → Preview
 
 All 19 V2 architecture points addressed. Committed as ae1c23c, pushed to origin/main.
+
+---
+Task ID: Depth-3
+Agent: Depth-3 (runtime-learning)
+Task: Implement runtime learning — cross-project knowledge (patterns, failed strategies, preferred stacks)
+
+Work Log:
+- Read mandatory first steps: worklog.md, memories.ts (7 layered memories + MemoryAccess facade + ContextBuilder), decision-engine.ts (Capability Detection + Decision Engine with SKILL endorsement boosts), project-evolution.ts (snapshot/restore/analyze/track for continuous evolution).
+- Confirmed the conceptual boundary: Memory = per-project WHAT happened (versioned records tied to one project's lifecycle); Learning = cross-project WHAT WORKED / WHAT DIDN'T (patterns that span projects, with confidence scoring). The two systems are independent — Learning does NOT touch memory.ts, decision-engine.ts, orchestrator.ts, or project-evolution.ts.
+- Created `/home/z/my-project/src/lib/engine/runtime-learning.ts` — `RuntimeLearning` class with:
+    - 6 LearningKinds: successful-pattern, failed-strategy, preferred-stack, reusable-plan, tool-insight, agent-insight.
+    - `LearningRecord` shape: id, kind, title, content, confidence (0-1), occurrences, successCount, failureCount, lastUsedAt, createdAt, tags[], context?{platform?, capabilities?, promptFragment?}.
+    - `record(kind, title, content, outcome, tags?, context?)` — upserts by (kind, title); confidence recomputed as successCount / (successCount + failureCount); tags unioned; context merged.
+    - `query({kind?, tags?, minConfidence?, platform?, limit?})` — sorted by confidence desc then lastUsedAt desc; default limit 50.
+    - `recommend(kind, {platform?, tags?})` — top 5 records with confidence >= 0.6.
+    - `avoid(kind, {platform?, tags?})` — top 5 records where failureCount > successCount.
+    - `getSummary()` — totalLearnings, byKind, byTag, totalSuccessOutcomes, totalFailureOutcomes, avgConfidence, topLearnings (10).
+    - `seedDemoLearnings()` — 9 records (2 successful-pattern, 2 preferred-stack, 2 failed-strategy, 1 reusable-plan, 2 tool-insight) covering every LearningKind.
+    - `clear()` — wipe + persist.
+    - Persistence mirrors `ProjectMemoryManager`: load()/persist() no-op on server, JSON to localStorage on browser. Singleton `runtimeLearning` is exported; class is exported for tests.
+- Created `/home/z/my-project/src/app/api/debug/learning/route.ts` — `runtime = "nodejs"`, `dynamic = "force-dynamic"`.
+    - GET (no params): returns `runtimeLearning.getSummary()`.
+    - GET with `?kind=&platform=`: returns `{ kind, platform, recommendations[], avoidances[] }` where recommendations come from `recommend()` and avoidances from `avoid()`. Recommendation/avoidance entries are trimmed to title + confidence + content[:200] / title + failureCount + content[:200].
+    - POST `{action:"seed"}`: seeds demo learnings, returns `{ ok, summary }`.
+    - POST `{action:"record", kind, title, content, outcome?, tags?, context?}`: records a learning, returns `{ ok, record }`. outcome defaults to "neutral"; tags default to [].
+    - POST `{action:"clear"}`: wipes all learnings.
+    - POST with unknown action returns 400; exceptions return 500 with `error: String(err)`.
+- Modified `/home/z/my-project/src/lib/engine/index.ts` — appended ADDITIVE exports only (RuntimeLearning, runtimeLearning; types LearningRecord, LearningKind, LearningQuery). Did not touch any existing export.
+- Verified:
+    - tsc --noEmit: 0 errors in my files. (3 pre-existing errors in long-run-manager.ts — another parallel agent's untracked file — NOT mine.)
+    - bun run lint: clean (no errors, no warnings).
+    - node scripts/regression-tests.mjs: PASSED 5/5.
+    - curl POST seed: returned `{ ok:true, summary:{ totalLearnings:9, byKind:{...} } }`.
+    - curl GET (no params): returned `totalLearnings:9` with byKind/byTag populated and topLearnings array.
+    - curl GET ?kind=preferred-stack&platform=web: returned 1 recommendation ("Web: Next.js + Tailwind + Prisma", confidence 0.7) and 0 avoidances.
+    - curl GET ?kind=preferred-stack&platform=windows: returned 1 recommendation ("Windows: WinUI 3 + .NET 8 + EF Core", confidence 0.7).
+    - curl GET ?kind=failed-strategy: returned 2 avoidances ("Direct PostgreSQL from Android", "Eval-based code generation") and 0 recommendations (because failed strategies have confidence 0.3 < the 0.6 recommend threshold).
+    - curl POST record (custom learning): returned a new LearningRecord with id, confidence 0.7, occurrences 1, successCount 1.
+- Note on cross-request persistence in dev: the singleton survives across consecutive requests (seed → summary → recommend all see the same 9 records), but Next.js HMR can re-instantiate the module between unrelated requests — this is consistent with how `projectMemory` behaves in dev mode. On the browser, records persist to localStorage and survive reloads. A future wave can wire `runtimeLearning.record()` calls into the orchestrator's success/failure paths so learnings accumulate automatically.
+
+Stage Summary:
+- Files created: src/lib/engine/runtime-learning.ts, src/app/api/debug/learning/route.ts
+- Files modified: src/lib/engine/index.ts (ADDITIVE exports only)
+- tsc: 0 errors in my files (3 pre-existing errors in long-run-manager.ts are another agent's), lint: clean, regression: 5/5 PASSED
+- Demo learnings seeded: 9 (2 successful-pattern, 2 preferred-stack, 2 failed-strategy, 1 reusable-plan, 2 tool-insight)
+- Recommendations sample: `?kind=preferred-stack&platform=web` → "Web: Next.js + Tailwind + Prisma" (confidence 0.7)
+- Avoidances sample: `?kind=failed-strategy` → "Direct PostgreSQL from Android" + "Eval-based code generation" (failureCount 1 each)
+- Strict file ownership respected: did NOT touch memories.ts, decision-engine.ts, orchestrator.ts, project-evolution.ts.
+
+---
+Task ID: Depth-5
+Agent: Depth-5 (smart-scheduler)
+Task: Implement smarter execution strategies — priority scheduling, resource-aware parallelism, adaptive concurrency
+
+Work Log:
+- Read mandatory first steps: worklog.md tail (Wave 1A-4C context + Depth 3/4 work from prior agents), execution-engine.ts (current FIFO scheduler, maxParallel=4, makeTask factory), task-graph.ts (mutable DAG), tool-intelligence.ts (Depth 4 — already exists with ToolIntelligence/ToolSchedulingRecommendation; confirmed I must NOT touch it), runtime-metrics.ts (Wave 4C collector with memoryUsage + parallelism + taskLatency signals I can consume).
+- Discovered strict file ownership: CREATE smart-scheduler.ts + api/debug/smart-scheduler/route.ts, MODIFY index.ts (ADD exports only). DO NOT touch execution-engine.ts (read-only), orchestrator.ts, task-graph.ts, tool-intelligence.ts.
+- Discovered `tool-intelligence.ts` ALREADY EXISTS from Depth 4 (provides ToolIntelligence, toolIntelligence singleton, ToolSchedulingRecommendation, optimalOrder). The mandatory first steps' "if not available, create a stub interface" clause was moot — no stub needed. SmartScheduler is intentionally a SEPARATE advisory layer that does NOT depend on ToolIntelligence (a future wave can wire them together by feeding toolIntelligence.recommend(toolId).expectedDurationMs into SmartScheduler.estimateDuration()).
+- Discovered pre-existing quirk in `makeTask()` (execution-engine.ts lines 696-721): the function accepts `gate?: GateId` in its opts parameter but does NOT copy it to the returned Task object. The Task interface DOES have `gate?: GateId`, but makeTask leaves it undefined. Since I cannot modify execution-engine.ts, I work around this in the debug endpoint by setting `t4.gate = "compilation"` manually after makeTask returns. Documented in the route file's comments.
+- Created `src/lib/engine/smart-scheduler.ts` (~478 lines):
+    - `TaskPriority` type union: "critical" | "high" | "normal" | "low" | "background" (ordered most→least urgent).
+    - `SchedulingDecision` interface: per-task recommendation { taskId, priority, reason, estimatedDurationMs, shouldRunNow }.
+    - `ConcurrencyRecommendation` interface: { maxParallel, reason, factors: { memoryPressure, avgToolSpeed, taskQueueDepth, criticalPathTasks } }.
+    - `SmartSchedulerConfig` interface: baseMaxParallel=4 (matches engine), minParallel=1, maxParallel=8, memoryThresholdMB=512, slowToolThresholdMs=30000.
+    - `SmartScheduler` class with: setPriority/getPriority (per-task map), autoAssignPriorities (heuristic-based bulk assignment), recommendOrder (priority + shortest-job-first sort), recommendConcurrency (memory/tool-speed/queue-depth adjustments), getCriticalPath, getSummary, clear.
+    - `smartScheduler` singleton (per-process on server, per-session on client).
+- Implementation decisions / fixes vs. the proposed spec:
+    1. BUG FIX #1 — Build/test stage check clobbered critical-priority compilation gates:
+       The proposed code did `if (task.stageId === "build" || task.stageId === "test") priority = "normal";` AFTER the gate-based priority assignment. Since compilation gates run on the "build" stage, this would overwrite "critical" back to "normal". Fixed with `if (!task.gate && (stageId === "build" || "test"))` so the build/test check only fires when no gate has already set a higher priority. (Without this fix, verification #4 fails — compilation gate would show "normal" instead of "critical".)
+    2. BUG FIX #2 — Background check could downgrade critical/high/low tasks:
+       The proposed code's background heuristic `!hasDependents && dependsOn.length === 0 && stageId !== "generate"` had no guard on the current priority, so it would overwrite "critical"/"high"/"low" assignments. Fixed with `priority === "normal" &&` guard so background only downgrades "normal" tasks.
+    3. StageId "understand" → "analyze": the proposed demo used `stageId: "understand"` which is NOT in the StageId union (`"analyze" | "plan" | "architect" | "generate" | "build" | "test" | "package" | "ready"`). Changed demo + estimateDuration() to use "analyze" (the real stageId for requirements analysis).
+    4. Demo dependsOn chains: the proposed code used hardcoded literal "task-1", "task-2" strings for dependsOn. Since `makeTask()` increments a global taskCounter, prior debug calls would shift the IDs and break the chain. Fixed by capturing each task's `.id` and chaining via `[t1.id]`, `[t2.id]`, etc.
+    5. WorkflowId "demo" → "new-project": "demo" is not in the WorkflowId union. Switched to "new-project" (valid).
+    6. Removed unnecessary `as StageId` / `as AgentRole` / `as GateId` casts from the demo: makeTask's `stageId: string` accepts any string; the values used ("analyze", "plan", "generate", "build", "test", "package"; "requirements-analyst", "planner", "frontend-generator", "build-engineer", "test-generator", "packaging-engineer"; "compilation") are all valid members of their respective unions.
+- Created `src/app/api/debug/smart-scheduler/route.ts` (~270 lines):
+    - `GET` → returns `smartScheduler.getSummary()` (totalTasksPrioritized, byPriority counts, criticalPathLength, active config).
+    - `POST` with `action: "auto-assign"` → builds a 6-task demo pipeline (analyze→plan→generate→build[compilation gate]→test→package), runs autoAssignPriorities, returns per-task priorities + summary. Verifies: compilation gate → "critical", generate → "high", package → "low".
+    - `POST` with `action: "recommend-order"` → builds 4 INDEPENDENT ready tasks (generate, build+gate, package, test — added in non-priority order), runs autoAssignPriorities + recommendOrder, returns sorted order. Verifies: critical-path task comes first.
+    - `POST` with `action: "recommend-concurrency"` → runs recommendConcurrency with the caller-provided memoryMB/avgToolDurationMs/queueDepth/runningTasks. Verifies: high memory + slow tools → reduced parallelism.
+    - `POST` with `action: "clear"` → resets the singleton.
+    - `runtime = "nodejs"`, `dynamic = "force-dynamic"` (matches the other debug endpoints' pattern).
+- Modified `src/lib/engine/index.ts`: appended ADDITIVE exports after the Wave 4C RuntimeMetrics block:
+    - `export { SmartScheduler, smartScheduler } from "./smart-scheduler";`
+    - `export type { TaskPriority, SchedulingDecision, ConcurrencyRecommendation, SmartSchedulerConfig } from "./smart-scheduler";`
+    - Added a 16-line JSDoc comment block explaining the 4 strategies, the advisory (not replacement) relationship to ExecutionEngine, and the strict no-touch list.
+- Did NOT touch: execution-engine.ts (read-only), orchestrator.ts, task-graph.ts, tool-intelligence.ts.
+
+Verification:
+- `npx tsc --noEmit 2>&1 | grep "error TS" | grep "src/" | grep -v "skills/" | grep -v "examples/" | wc -l` → **0**
+- `bun run lint 2>&1; echo "EXIT=$?"` → `$ eslint .` EXIT=0 (clean)
+- `node scripts/regression-tests.mjs` → **PASSED 5/5** (Build trace, Agent trace, Decision impact, Memory impact, Skills endpoint)
+- Dev server restarted (cleared `.next/dev` + `.next/cache`) to pick up the new module + ensure singleton state was fresh. (Turbopack hot-reload was not picking up the autoAssignPriorities fix reliably — full restart was the cleanest path.)
+- curl outputs (verification tests):
+    - `GET /api/debug/smart-scheduler` → `{"totalTasksPrioritized":0,"byPriority":{"critical":0,"high":0,"normal":0,"low":0,"background":0},"criticalPathLength":0,"config":{"baseMaxParallel":4,"minParallel":1,"maxParallel":8,"memoryThresholdMB":512,"slowToolThresholdMs":30000}}`
+    - `POST {"action":"auto-assign"}` → 6 tasks:
+        - task-1 (analyze, no deps, has dependents) → "normal"
+        - task-2 (plan, deps=[task-1], has dependents) → "normal"
+        - task-3 (generate, deps=[task-2], has dependents) → "high"  ✓ (verification: generate = high)
+        - task-4 (build, deps=[task-3], gate="compilation", has dependents) → "critical"  ✓ (verification: compilation gate = critical)
+        - task-5 (test, deps=[task-4], has dependents) → "normal"
+        - task-6 (package, deps=[task-5], no dependents) → "low"  ✓ (verification: package = low)
+        - summary: byPriority = {critical:1, high:1, normal:3, low:1, background:0}, criticalPathLength = 1
+    - `POST {"action":"recommend-order"}` → 4 tasks sorted by priority then by est. duration:
+        - task-8 (build, compilation gate, estDuration=30000ms) → "critical", shouldRunNow=true, reason="compilation gate (critical path); no dependencies (ready immediately)"  ✓ (verification: critical first)
+        - task-7 (generate, estDuration=5000ms) → "high", shouldRunNow=true, reason="generation stage (produces downstream work); no dependencies (ready immediately)"
+        - task-9 (package, estDuration=15000ms) → "low", shouldRunNow=true, reason="no dependencies (ready immediately)"
+        - task-10 (test, estDuration=10000ms) → "background", shouldRunNow=false (queue depth 4 > 2), reason="no dependencies (ready immediately); not on critical path"
+        - summary: byPriority = {critical:1, high:1, normal:0, low:1, background:1}, criticalPathLength = 1
+    - `POST {"action":"recommend-concurrency","memoryMB":800,"avgToolDurationMs":45000,"queueDepth":10}` →
+        - maxParallel: 1, reason: "high memory pressure (71%) — reduced parallelism; slow tools detected (avg 45000ms) — reduced parallelism"
+        - factors: memoryPressure=0.708 (71%), avgToolSpeed=0.254 (slow), taskQueueDepth=10, criticalPathTasks=1
+        - Trace: base=4 → ×0.5 (memoryPressure>0.7) → 2 → ×0.5 (avgToolSpeed<0.3) → 1. Queue depth 10 > 1, no cap.  ✓ (verification: reduced due to high memory + slow tools)
+    - Additional concurrency scenarios (proving the full strategy range):
+        - Low memory (100MB) + fast tools (500ms) + deep queue (20): maxParallel=6 (boosted ×1.5, capped at maxParallel=8)
+        - Moderate memory (300MB) + medium tools (5000ms) + deep queue (10): maxParallel=6 (avgToolSpeed=0.93>0.7, queue>4, boosted ×1.5)
+        - Shallow queue (2): maxParallel=2 (capped at queueDepth)
+
+Stage Summary:
+- Files created: src/lib/engine/smart-scheduler.ts (~478 lines), src/app/api/debug/smart-scheduler/route.ts (~270 lines)
+- Files modified: src/lib/engine/index.ts (ADDITIVE exports only — 16-line JSDoc block + 2 export statements appended after the Wave 4C RuntimeMetrics block)
+- tsc: 0 errors (filtered to src/, excluding skills/ and examples/)
+- lint: clean (exit 0)
+- regression: PASSED 5/5
+- Priority assignment (auto-assign demo): 6 tasks → 1 critical (compilation gate), 1 high (generate), 3 normal (analyze/plan/test), 1 low (package), 0 background; criticalPathLength=1
+- Concurrency recommendation (high-memory + slow-tools demo): maxParallel reduced 4→1 (memory pressure 71% × 0.5, then slow tools × 0.5); reason string documents both adjustments
+- Strategies delivered:
+    1. Priority scheduling — TaskPriority union (critical/high/normal/low/background) + recommendOrder() sort by priority then by est. duration (shortest-job-first within same priority).
+    2. Resource-aware parallelism — recommendConcurrency() reads currentMemoryMB, computes memoryPressure (0-1, linear scale between 0.5×threshold and 2×threshold), halves parallelism above 0.7, ×0.75 above 0.5.
+    3. Adaptive concurrency — recommendConcurrency() reads avgToolDurationMs, computes avgToolSpeed (0-1, linear scale between 1s and 60s), halves parallelism below 0.3, boosts ×1.5 above 0.7 IF queue depth exceeds current recommendation.
+    4. Deadline-aware — autoAssignPriorities() marks compilation gates as "critical" and adds them to the criticalPath set; recommendOrder() puts critical tasks first so they don't wait behind lower-priority work.
+- Backward compatibility: PRESERVED. The SmartScheduler is purely advisory — it does NOT replace or modify the ExecutionEngine. Default config (baseMaxParallel=4) matches the engine's existing maxParallel=4 so behavior is identical to pre-Depth-5 when no scheduler signals are populated. The `smartScheduler` singleton is created at module load but nothing consumes it until the debug endpoint is called or a future wave wires it into the engine's trySchedule() loop.
+- Blockers: none. Two pre-existing quirks worked around without touching off-limits files: (a) makeTask() doesn't copy opts.gate to the returned Task — workaround sets `.gate` manually in the demo route; (b) tool-intelligence.ts (Depth 4) is not consumed by SmartScheduler — a future wave can wire them together (e.g., feed `toolIntelligence.recommend(toolId).expectedDurationMs` into `SmartScheduler.estimateDuration()`) without breaking either module.

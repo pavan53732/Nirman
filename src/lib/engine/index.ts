@@ -283,6 +283,28 @@ export type {
   CollaborationConfig,
 } from "./agent-collaboration";
 
+// Negotiation Engine (Depth 1) — multi-party agent negotiation until
+// consensus. Unlike critiqueRefine (producer ↔ critic, 2-party), the
+// NegotiationEngine orchestrates 3+ reviewers (Planner ⇄ Architect ⇄
+// Security ⇄ Reviewer pattern) where each reviewer raises concerns from
+// its own perspective and the producer refines the proposal until ALL
+// reviewers approve (or maxRounds is hit). These exports are ADDITIVE
+// and do not modify agent-collaboration.ts, orchestrator.ts,
+// execution-engine.ts, agent-handlers.ts, or any other engine file.
+export {
+  NegotiationEngine,
+  negotiationEngine,
+  negotiationReviewHandlers,
+  negotiationParticipants,
+} from "./negotiation-engine";
+export type {
+  NegotiationParticipant,
+  NegotiationConcern,
+  NegotiationRound,
+  NegotiationResult,
+  NegotiationConfig,
+} from "./negotiation-engine";
+
 // Project Evolution (Task Y) — snapshot/restore/analyze/track for continuous
 // evolution. Enables Nirman to reopen an existing project months later,
 // understand its architecture, and continue evolving it without losing prior
@@ -406,3 +428,92 @@ export type {
   CacheMetric,
   GraphQueryMetric,
 } from "./runtime-metrics";
+
+// Smart Scheduler (Depth-5) — provides intelligent scheduling strategies on
+// top of the ExecutionEngine's basic FIFO scheduler. Four strategies:
+//   1. Priority scheduling    — higher-priority tasks (compilation gates,
+//      generation) run before lower-priority ones (packaging, docs).
+//   2. Resource-aware parallelism — reduce concurrency when heap usage
+//      crosses the configured memoryThresholdMB.
+//   3. Adaptive concurrency   — bump maxParallel when tools are fast and
+//      the queue is deep; reduce it when tools are slow.
+//   4. Deadline-aware         — critical-path tasks (compilation gates)
+//      get "critical" priority so they don't wait behind background work.
+// The SmartScheduler is ADVISORY — it does NOT replace the ExecutionEngine.
+// It provides `recommendOrder()` and `recommendConcurrency()` decisions
+// that the engine (or a future wave's trySchedule() integration) can
+// consult. The shared `smartScheduler` singleton is exposed via
+// /api/debug/smart-scheduler. ADDITIVE — does NOT modify execution-engine.ts,
+// orchestrator.ts, task-graph.ts, or tool-intelligence.ts. Default config
+// matches the engine's existing `maxParallel: 4` so behavior is identical
+// to pre-Depth-5 when no scheduler signals are populated.
+export { SmartScheduler, smartScheduler } from "./smart-scheduler";
+export type {
+  TaskPriority,
+  SchedulingDecision,
+  ConcurrencyRecommendation,
+  SmartSchedulerConfig,
+} from "./smart-scheduler";
+
+// Tool Intelligence (Depth 4) — learns tool performance over time and uses it
+// for scheduling decisions. Tracks every tool invocation (duration,
+// success/failure, error type, context), computes per-tool statistics (avg
+// duration, success rate, p50/p95 latency, reliability score, common errors),
+// and surfaces scheduling recommendations (priority, expected duration,
+// retry policy, timeout ceiling). The `optimalOrder()` helper sorts a set of
+// tools so reliable + fast tools run first, slow/unreliable tools last.
+// ADDITIVE — does NOT modify ToolManager, the tool registry, the Sandbox,
+// RuntimeMetrics, or the Orchestrator. Tool Intelligence is an advisory
+// layer; subsystems consult it via `toolIntelligence.recommend(toolId)` /
+// `toolIntelligence.optimalOrder(toolIds)` before scheduling, but nothing is
+// forced to consume it. Exposed via the /api/debug/tool-intelligence
+// endpoint.
+//
+// NOTE on naming: the exported recommendation interface is
+// `ToolSchedulingRecommendation`, NOT `ToolRecommendation` — the latter name
+// is already taken by `./skill-tool-router` (re-exported above) where it
+// means "skill S says use tool T". The two are conceptually different:
+// skill-router recommends tools based on the agent's injected skills;
+// tool-intelligence recommends scheduling parameters based on past
+// performance.
+export { ToolIntelligence, toolIntelligence } from "./tool-intelligence";
+export type {
+  ToolInvocation,
+  ToolStats,
+  ToolSchedulingRecommendation,
+} from "./tool-intelligence";
+
+// Long-Run Manager — pause/resume/checkpoint/recover for projects that run
+// 20-60 minutes. A coordination layer on top of the existing engine
+// singletons (taskGraph, projectMemory, artifactRegistry, executionEngine)
+// that persists a LongRunSnapshot so an interrupted build can be resumed
+// from the last checkpoint without restarting. ADDITIVE — does NOT modify
+// execution-engine.ts, orchestrator.ts, idb.ts, task-graph.ts, memories.ts,
+// or any other engine file. Exposed via the /api/debug/long-run endpoint.
+export { LongRunManager, longRunManager } from "./long-run-manager";
+export type {
+  LongRunSnapshot,
+  CheckpointRecord,
+  RecoveryCandidate,
+  RunState,
+} from "./long-run-manager";
+
+// Runtime Learning (Depth-3) — cross-project knowledge that improves future
+// builds. Unlike Memory (which is per-project — see `memories.ts`),
+// Learning stores patterns that span projects: successful architectural
+// patterns, failed repair strategies, preferred stack choices, reusable
+// implementation plans, tool insights, agent insights. Each learning
+// record has a confidence score (0-1) that increases with repeated
+// success and decreases with failure. The decision engine can call
+// `runtimeLearning.recommend(kind, { platform })` to prefer stacks/patterns
+// that worked before, and `runtimeLearning.avoid(kind, { platform })` to
+// steer clear of strategies that failed. ADDITIVE — does NOT modify
+// memories.ts, decision-engine.ts, orchestrator.ts, or project-evolution.ts.
+// Persisted to localStorage in the browser; in-process on the server
+// (sufficient for the /api/debug/learning seed → query demo flow).
+export { RuntimeLearning, runtimeLearning } from "./runtime-learning";
+export type {
+  LearningRecord,
+  LearningKind,
+  LearningQuery,
+} from "./runtime-learning";
