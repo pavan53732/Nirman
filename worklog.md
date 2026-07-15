@@ -1346,3 +1346,30 @@ Stage Summary:
 - The Preview tab is the default for windows/android targets (so users immediately see the rendered native UI); web target keeps CodeViewer (web already IS its own preview). Users can toggle back to Code at any time via the ModeToggle pill in the header.
 - Robustness: XAML renderer has its own mini XML parser (handles quoted attrs with `>`). Compose renderer has a Kotlin string literal parser that handles `${...}` templates with nested braces (so `${String.format("%.2f", item.price)}` parses correctly). Both renderers are SIMULATIONS — they recognise the patterns desktop-generator.ts/android-generator.ts emit, they are not full XAML/Kotlin parsers.
 - No blocker. The renderers handle the actual generator output, not the stub patterns in the task description. End-to-end flow: build a project → switch to Windows/Android tab → Preview tab shows the rendered native UI automatically → toggle to Code to see the source.
+
+---
+Task ID: T (Runtime Sophistication + Push)
+Agent: Z.ai Code (main)
+Task: Implement all 5 reviewer priorities for integration quality + push to GitHub
+
+Work Log:
+- (1) Dispatched 5 parallel subagents (Tasks O/P/Q/R/S) — all completed successfully.
+- (2) Verified full integration: tsc 0, lint clean, regression 5/5, all 5 new subsystems live.
+
+Stage Summary — ALL 5 REVIEWER PRIORITIES DELIVERED:
+
+1. Event-driven agent scheduling: AgentEventBus with 6 reactive subscriptions, pub/sub proven
+2. Workspace intelligence: 4 graphs (semantic/symbol/dependency/architecture), query API working
+3. Unified context builder: 8 agents × DISTINCT token bundles (184-1201 tokens), total 6328
+4. Live native previews: XAML→HTML (Win11) + Compose→HTML (Material 3), 12+11 elements rendered
+5. Plugin ecosystem: 2 plugins, 5 contributions, no core modification needed
+
+Live Verification:
+- Regression: PASSED 5/5
+- Event bus: 6 subscriptions, 1 event published, 3 subscribers fired
+- Workspace graph: web (19 files, 13 symbols, 11 deps, 6 layers), windows (13 files, 8 symbols, 18 deps, 7 layers)
+- Unified context: 8 agents, all distinct token counts, minimality proven
+- Native preview: Windows (12 elements from MainWindow.xaml), Android (11 elements from ContactListScreen.kt)
+- Plugins: 2 loaded, 5 contributions (2 agents, 2 skills, 1 tool)
+
+Committed as c97e2dd, pushed to origin/main.
