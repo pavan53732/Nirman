@@ -12,7 +12,12 @@
 // proceeds autonomously.
 
 import type { EngineEvent } from "../types";
-import { executionEngine, observability } from "../index";
+// CRITICAL: Import directly from specific modules, NOT from ../index (the barrel).
+// The barrel calls orchestrator.bootstrap() at load time, creating a circular
+// dependency: client.ts → orchestrator → workflow-engine → ambiguity-detector
+// → ../index → orchestrator (not yet initialized) → CRASH
+import { executionEngine } from "../execution-engine";
+import { observability } from "../observability";
 
 /** grep-able constant — the ambiguity threshold above which the engine asks. */
 export const AMBIGUITY_THRESHOLD = 0.75;

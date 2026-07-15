@@ -22,7 +22,7 @@ import {
   stageDetails,
   makeArtifacts,
 } from "./mock-data";
-import { orchestrator, detectTargets, detectNonFunctionals, executionEngine, checkpointManager } from "./engine";
+import { orchestrator, detectTargets, detectNonFunctionals, executionEngine, checkpointManager } from "./engine/client";
 
 interface AppState {
   // data

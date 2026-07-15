@@ -89,7 +89,7 @@ export function useChat() {
 
         // Charge real tokens to observability + cost optimizer
         if (realTokens > 0) {
-          const { observability, tokenBudgetManager } = await import("@/lib/engine");
+          const { observability, tokenBudgetManager } = await import("@/lib/engine/client");
           observability.chargeTokens("planner", realTokens, "new-project");
           tokenBudgetManager.charge("planner", "new-project", realTokens);
           addLog("info", "provider", `Chat used ${realTokens} tokens (real usage from provider)`);
