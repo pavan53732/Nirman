@@ -3,8 +3,9 @@
 import { useMemo, useState, useEffect } from "react";
 import { useApp } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { Monitor, Smartphone, Globe, RefreshCw, Layers, FileCode, Zap } from "lucide-react";
+import { Monitor, Smartphone, Globe, RefreshCw, Layers, FileCode, Zap, Eye, Code2 } from "lucide-react";
 import type { PreviewTarget, ProjectMeta, TargetSpec } from "@/lib/types";
+import { NativePreview } from "./native-preview";
 
 const kindToPreview: Record<string, PreviewTarget> = {
   windows: "windows",
@@ -173,6 +174,10 @@ function BuildingState({ projectName, targetKind }: { projectName?: string; targ
 function RealPreview({ project, targetKind }: { project: ProjectMeta; targetKind: PreviewTarget }) {
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [loading, setLoading] = useState(true);
+  // "code" shows generated source; "preview" shows the rendered native UI.
+  // Only windows + android get the Preview tab — web target already IS the preview.
+  const supportsPreview = targetKind === "windows" || targetKind === "android";
+  const [mode, setMode] = useState<"code" | "preview">(supportsPreview ? "preview" : "code");
 
   const target = project.targets.find((t) => kindToPreview[t.kind] === targetKind);
   const folder = target?.kind === "windows" ? "desktop" : target?.kind === "android" ? "android" : "web-admin";
@@ -195,6 +200,10 @@ function RealPreview({ project, targetKind }: { project: ProjectMeta; targetKind
     return () => { cancelled = true; };
   }, [project, folder]);
 
+  // Note: mode is only relevant for windows/android (supportsPreview=true).
+  // For the web target, the toggle is hidden and CodeViewer is always shown
+  // regardless of the mode value — see the targetKind === "web" branch below.
+
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -204,6 +213,23 @@ function RealPreview({ project, targetKind }: { project: ProjectMeta; targetKind
   }
 
   if (files.length === 0) {
+    // For native targets, the preview can render even when the file list is
+    // empty here (the render endpoint reads the workspace directly). So show
+    // the native preview in preview mode even without a file list.
+    if (supportsPreview && mode === "preview") {
+      return (
+        <div className="flex h-full min-h-0 flex-col">
+          <ModeToggle mode={mode} setMode={setMode} supportsPreview={supportsPreview} />
+          <div className="flex-1 min-h-0">
+            <NativePreview
+              target={targetKind as "windows" | "android"}
+              projectId={project.id}
+              refreshKey={`${project.id}-${folder}-${project.createdAt}`}
+            />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex h-full items-center justify-center">
         <div className="flex flex-col items-center gap-2 text-center">
@@ -216,6 +242,23 @@ function RealPreview({ project, targetKind }: { project: ProjectMeta; targetKind
     );
   }
 
+  // Preview mode: render the native UI approximation.
+  if (mode === "preview" && supportsPreview) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <ModeToggle mode={mode} setMode={setMode} supportsPreview={supportsPreview} />
+        <div className="flex-1 min-h-0">
+          <NativePreview
+            target={targetKind as "windows" | "android"}
+            projectId={project.id}
+            refreshKey={`${project.id}-${folder}-${project.createdAt}`}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Code mode (default for web, opt-in for windows/android):
   // Web target: show single CodeViewer with file tabs
   if (targetKind === "web") {
     return <CodeViewer files={files} title="Web — Next.js source" />;
@@ -226,13 +269,18 @@ function RealPreview({ project, targetKind }: { project: ProjectMeta; targetKind
     const xamlFile = files.find((f) => f.path.endsWith(".xaml") && f.path.includes("MainWindow"));
     const vmFile = files.find((f) => f.path.endsWith(".cs") && f.path.includes("MainViewModel"));
     return (
-      <SplitCodeViewer
-        files={files}
-        leftFile={xamlFile}
-        rightFile={vmFile}
-        title="Windows — WinUI 3 source"
-        note="Export and open .sln in Visual Studio to run"
-      />
+      <div className="flex h-full min-h-0 flex-col">
+        <ModeToggle mode={mode} setMode={setMode} supportsPreview={supportsPreview} />
+        <div className="flex-1 min-h-0">
+          <SplitCodeViewer
+            files={files}
+            leftFile={xamlFile}
+            rightFile={vmFile}
+            title="Windows — WinUI 3 source"
+            note="Export and open .sln in Visual Studio to run"
+          />
+        </div>
+      </div>
     );
   }
 
@@ -240,13 +288,63 @@ function RealPreview({ project, targetKind }: { project: ProjectMeta; targetKind
   const screenFile = files.find((f) => f.path.endsWith(".kt") && f.path.includes("ListScreen"));
   const mainFile = files.find((f) => f.path.endsWith(".kt") && f.path.includes("MainActivity"));
   return (
-    <SplitCodeViewer
-      files={files}
-      leftFile={screenFile}
-      rightFile={mainFile}
-      title="Android — Jetpack Compose source"
-      note="Export and open in Android Studio to run"
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      <ModeToggle mode={mode} setMode={setMode} supportsPreview={supportsPreview} />
+      <div className="flex-1 min-h-0">
+        <SplitCodeViewer
+          files={files}
+          leftFile={screenFile}
+          rightFile={mainFile}
+          title="Android — Jetpack Compose source"
+          note="Export and open in Android Studio to run"
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ---- Mode toggle (Code | Preview) shown above windows/android views ---- */
+function ModeToggle({
+  mode,
+  setMode,
+  supportsPreview,
+}: {
+  mode: "code" | "preview";
+  setMode: (m: "code" | "preview") => void;
+  supportsPreview: boolean;
+}) {
+  if (!supportsPreview) return null;
+  return (
+    <div className="flex shrink-0 items-center justify-end gap-0.5 border-b border-border bg-muted/30 px-3 py-1.5">
+      <div className="flex items-center gap-0.5 rounded-lg bg-muted/60 p-0.5">
+        <button
+          onClick={() => setMode("preview")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition",
+            mode === "preview"
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+          aria-pressed={mode === "preview"}
+        >
+          <Eye className="h-3.5 w-3.5" />
+          Preview
+        </button>
+        <button
+          onClick={() => setMode("code")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition",
+            mode === "code"
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+          aria-pressed={mode === "code"}
+        >
+          <Code2 className="h-3.5 w-3.5" />
+          Code
+        </button>
+      </div>
+    </div>
   );
 }
 

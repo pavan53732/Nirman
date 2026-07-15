@@ -1,0 +1,987 @@
+     1→// Real Android Generator — produces a complete, compilable Jetpack Compose
+     2→// app with Room persistence, Hilt DI, Navigation, and CRUD screens derived
+     3→// from the data model.
+     4→//
+     5→// Output structure:
+     6→//   settings.gradle.kts
+     7→//   build.gradle.kts (root)
+     8→//   gradle/libs.versions.toml
+     9→//   app/build.gradle.kts
+    10→//   app/src/main/AndroidManifest.xml
+    11→//   app/src/main/java/com/pavan/<app>/MainActivity.kt
+    12→//   app/src/main/java/com/pavan/<app>/data/local/AppDatabase.kt
+    13→//   app/src/main/java/com/pavan/<app>/data/local/<Entity>Dao.kt
+    14→//   app/src/main/java/com/pavan/<app>/data/local/<Entity>Entity.kt
+    15→//   app/src/main/java/com/pavan/<app>/data/repository/<Entity>Repository.kt
+    16→//   app/src/main/java/com/pavan/<app>/ui/theme/Theme.kt
+    17→//   app/src/main/java/com/pavan/<app>/ui/screens/<Entity>ListScreen.kt
+    18→//   app/src/main/java/com/pavan/<app>/ui/screens/<Entity>ViewModel.kt
+    19→//   app/src/main/java/com/pavan/<app>/PavanApp.kt (Application + Hilt)
+    20→//   app/src/main/res/values/strings.xml
+    21→//   app/src/main/res/values/themes.xml
+    22→//   gradle.properties
+    23→//   gradle/wrapper/gradle-wrapper.properties
+    24→//   README.md
+    25→
+    26→import type { VirtualFile, GenerationResult, DatabaseChoice } from "../generators";
+    27→import { registerFiles } from "../generators";
+    28→import type { Capability, NonFunctional } from "../types";
+    29→import { inferDataModel, pascal, camel, type DataModel } from "./data-model";
+    30→
+    31→export interface AndroidGenerationContext {
+    32→  projectName: string;
+    33→  targetId: string;
+    34→  prompt: string;
+    35→  capabilities: Capability[];
+    36→  nonFunctionals: NonFunctional[];
+    37→  /**
+    38→   * Database choice read from Architecture Memory. Defaults to "sqlite".
+    39→   *
+    40→   * On Android, Room is local-only (it wraps SQLite on the device). When the
+    41→   * user selects PostgreSQL we don't fake a direct PG driver — instead we
+    42→   * keep the Room layer (for offline cache) and ADD:
+    43→   *   - DATABASE_MIGRATION.md explaining the client/server split
+    44→   *   - data/remote/RetrofitApiService.kt — a Retrofit interface sketch
+    45→   *     that hits the backend API which owns the PG connection.
+    46→   *
+    47→   * This is honest: Android never talks to PostgreSQL directly. The note +
+    48→   * Retrofit sketch document the real architecture the user must build.
+    49→   */
+    50→  database?: DatabaseChoice;
+    51→}
+    52→
+    53→export function generateAndroidApp(ctx: AndroidGenerationContext): GenerationResult {
+    54→  const { projectName, targetId, prompt, capabilities, nonFunctionals } = ctx;
+    55→  const appName = pascal(projectName) || "MyApp";
+    56→  const pkg = appName.toLowerCase();
+    57→  const pkgPath = `com/pavan/${pkg}`;
+    58→  const pkgName = `com.pavan.${pkg}`;
+    59→  const model = inferDataModel(prompt);
+    60→  const entity = model.entityName;
+    61→  const entityLower = model.entityNameLower;
+    62→  const entityRoute = entity.toLowerCase(); // lowercase route + table name
+    63→  const useRoom = capabilities.includes("offline-sync") || nonFunctionals.includes("offline-first");
+    64→  // Architecture Memory's database choice. PostgreSQL on Android is unusual:
+    65→  // Room is local-only, so we ADD a DATABASE_MIGRATION.md note + Retrofit
+    66→  // API service sketch rather than fake direct PG access. See the bottom of
+    67→  // this function for the extra files emitted when usePostgres is true.
+    68→  const database: DatabaseChoice = ctx.database ?? "sqlite";
+    69→  const usePostgres = database === "postgresql";
+    70→  void nonFunctionals;
+    71→
+    72→  const files: VirtualFile[] = [];
+    73→
+    74→  // ---- settings.gradle.kts ----
+    75→  files.push({
+    76→    path: `settings.gradle.kts`,
+    77→    language: "kotlin",
+    78→    content: `pluginManagement {
+    79→    repositories {
+    80→        google()
+    81→        mavenCentral()
+    82→        gradlePluginPortal()
+    83→    }
+    84→}
+    85→dependencyResolutionManagement {
+    86→    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    87→    repositories {
+    88→        google()
+    89→        mavenCentral()
+    90→    }
+    91→}
+    92→
+    93→rootProject.name = "${appName}"
+    94→include(":app")
+    95→`,
+    96→  });
+    97→
+    98→  // ---- root build.gradle.kts ----
+    99→  files.push({
+   100→    path: `build.gradle.kts`,
+   101→    language: "kotlin",
+   102→    content: `// Top-level build file
+   103→plugins {
+   104→    alias(libs.plugins.android.application) apply false
+   105→    alias(libs.plugins.kotlin.android) apply false
+   106→    alias(libs.plugins.kotlin.compose) apply false
+   107→    alias(libs.plugins.hilt) apply false
+   108→    alias(libs.plugins.ksp) apply false
+   109→}
+   110→`,
+   111→  });
+   112→
+   113→  // ---- gradle/libs.versions.toml ----
+   114→  files.push({
+   115→    path: `gradle/libs.versions.toml`,
+   116→    language: "toml",
+   117→    content: `[versions]
+   118→agp = "8.7.2"
+   119→kotlin = "2.0.21"
+   120→coreKtx = "1.13.1"
+   121→lifecycle = "2.8.7"
+   122→activityCompose = "1.9.3"
+   123→composeBom = "2024.10.01"
+   124→navigation = "2.8.4"
+   125→room = "2.6.1"
+   126→hilt = "2.52"
+   127→hiltNavigation = "1.2.0"
+   128→ksp = "2.0.21-1.0.27"
+   129→
+   130→[libraries]
+   131→androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+   132→androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
+   133→androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+   134→androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+   135→androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+   136→androidx-ui = { group = "androidx.compose.ui", name = "ui" }
+   137→androidx-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+   138→androidx-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+   139→androidx-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+   140→androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
+   141→androidx-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
+   142→androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigation" }
+   143→androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+   144→androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+   145→androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+   146→hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
+   147→hilt-compiler = { group = "com.google.dagger", name = "hilt-compiler", version.ref = "hilt" }
+   148→androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "hiltNavigation" }
+   149→
+   150→[plugins]
+   151→android-application = { id = "com.android.application", version.ref = "agp" }
+   152→kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+   153→kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+   154→hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
+   155→ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+   156→`,
+   157→  });
+   158→
+   159→  // ---- app/build.gradle.kts ----
+   160→  files.push({
+   161→    path: `app/build.gradle.kts`,
+   162→    language: "kotlin",
+   163→    content: `plugins {
+   164→    alias(libs.plugins.android.application)
+   165→    alias(libs.plugins.kotlin.android)
+   166→    alias(libs.plugins.kotlin.compose)
+   167→    alias(libs.plugins.hilt)
+   168→    alias(libs.plugins.ksp)
+   169→}
+   170→
+   171→android {
+   172→    namespace = "${pkgName}"
+   173→    compileSdk = 34
+   174→
+   175→    defaultConfig {
+   176→        applicationId = "${pkgName}"
+   177→        minSdk = 26
+   178→        targetSdk = 34
+   179→        versionCode = 1
+   180→        versionName = "1.0"
+   181→        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+   182→    }
+   183→
+   184→    buildTypes {
+   185→        release {
+   186→            isMinifyEnabled = false
+   187→            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+   188→        }
+   189→    }
+   190→
+   191→    compileOptions {
+   192→        sourceCompatibility = JavaVersion.VERSION_17
+   193→        targetCompatibility = JavaVersion.VERSION_17
+   194→    }
+   195→
+   196→    kotlinOptions {
+   197→        jvmTarget = "17"
+   198→    }
+   199→
+   200→    buildFeatures {
+   201→        compose = true
+   202→    }
+   203→}
+   204→
+   205→dependencies {
+   206→    implementation(libs.androidx.core.ktx)
+   207→    implementation(libs.androidx.lifecycle.runtime.ktx)
+   208→    implementation(libs.androidx.lifecycle.viewmodel.compose)
+   209→    implementation(libs.androidx.activity.compose)
+   210→
+   211→    implementation(platform(libs.androidx.compose.bom))
+   212→    implementation(libs.androidx.ui)
+   213→    implementation(libs.androidx.ui.graphics)
+   214→    implementation(libs.androidx.ui.tooling.preview)
+   215→    implementation(libs.androidx.material3)
+   216→    implementation(libs.androidx.material.icons.extended)
+   217→    implementation(libs.androidx.navigation.compose)
+   218→
+   219→${useRoom ? `    implementation(libs.androidx.room.runtime)
+   220→    implementation(libs.androidx.room.ktx)
+   221→    ksp(libs.androidx.room.compiler)
+   222→
+   223→` : ""}    implementation(libs.hilt.android)
+   224→    ksp(libs.hilt.compiler)
+   225→    implementation(libs.androidx.hilt.navigation.compose)
+   226→
+   227→    debugImplementation(libs.androidx.ui.tooling)
+   228→}
+   229→`,
+   230→  });
+   231→
+   232→  // ---- AndroidManifest.xml ----
+   233→  files.push({
+   234→    path: `app/src/main/AndroidManifest.xml`,
+   235→    language: "xml",
+   236→    content: `<?xml version="1.0" encoding="utf-8"?>
+   237→<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+   238→
+   239→    <application
+   240→        android:name=".PavanApp"
+   241→        android:allowBackup="true"
+   242→        android:icon="@mipmap/ic_launcher"
+   243→        android:label="${projectName}"
+   244→        android:roundIcon="@mipmap/ic_launcher_round"
+   245→        android:supportsRtl="true"
+   246→        android:theme="@style/Theme.${appName}">
+   247→        <activity
+   248→            android:name=".MainActivity"
+   249→            android:exported="true"
+   250→            android:theme="@style/Theme.${appName}">
+   251→            <intent-filter>
+   252→                <action android:name="android.intent.action.MAIN" />
+   253→                <category android:name="android.intent.category.LAUNCHER" />
+   254→            </intent-filter>
+   255→        </activity>
+   256→    </application>
+   257→
+   258→</manifest>
+   259→`,
+   260→  });
+   261→
+   262→  // ---- PavanApp.kt (Application + Hilt) ----
+   263→  files.push({
+   264→    path: `app/src/main/java/${pkgPath}/PavanApp.kt`,
+   265→    language: "kotlin",
+   266→    content: `package ${pkgName}
+   267→
+   268→import android.app.Application
+   269→import dagger.hilt.android.HiltAndroidApp
+   270→
+   271→@HiltAndroidApp
+   272→class PavanApp : Application()
+   273→`,
+   274→  });
+   275→
+   276→  // ---- MainActivity.kt (NavHost + 2 screens) ----
+   277→  files.push({
+   278→    path: `app/src/main/java/${pkgPath}/MainActivity.kt`,
+   279→    language: "kotlin",
+   280→    content: `package ${pkgName}
+   281→
+   282→import android.os.Bundle
+   283→import androidx.activity.ComponentActivity
+   284→import androidx.activity.compose.setContent
+   285→import androidx.activity.enableEdgeToEdge
+   286→import androidx.compose.foundation.layout.fillMaxSize
+   287→import androidx.compose.foundation.layout.padding
+   288→import androidx.compose.material3.*
+   289→import androidx.compose.runtime.*
+   290→import androidx.compose.ui.Modifier
+   291→import androidx.navigation.compose.NavHost
+   292→import androidx.navigation.compose.composable
+   293→import androidx.navigation.compose.rememberNavController
+   294→import ${pkgName}.ui.theme.PavanTheme
+   295→import ${pkgName}.ui.screens.${entity}ListScreen
+   296→import ${pkgName}.ui.screens.OverviewScreen
+   297→import dagger.hilt.android.AndroidEntryPoint
+   298→
+   299→@AndroidEntryPoint
+   300→class MainActivity : ComponentActivity() {
+   301→    override fun onCreate(savedInstanceState: Bundle?) {
+   302→        super.onCreate(savedInstanceState)
+   303→        enableEdgeToEdge()
+   304→        setContent {
+   305→            PavanTheme {
+   306→                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+   307→                    val navController = rememberNavController()
+   308→                    NavHost(
+   309→                        navController = navController,
+   310→                        startDestination = "overview",
+   311→                        modifier = Modifier.padding(innerPadding)
+   312→                    ) {
+   313→                        composable("overview") {
+   314→                            OverviewScreen(
+   315→                                onNavigateTo${entity} = { navController.navigate("${entityRoute}") }
+   316→                            )
+   317→                        }
+   318→                        composable("${entityRoute}") {
+   319→                            ${entity}ListScreen()
+   320→                        }
+   321→                    }
+   322→                }
+   323→            }
+   324→        }
+   325→    }
+   326→}
+   327→`,
+   328→  });
+   329→
+   330→  // ---- ui/theme/Theme.kt ----
+   331→  files.push({
+   332→    path: `app/src/main/java/${pkgPath}/ui/theme/Theme.kt`,
+   333→    language: "kotlin",
+   334→    content: `package ${pkgName}.ui.theme
+   335→
+   336→import android.os.Build
+   337→import androidx.compose.foundation.isSystemInDarkTheme
+   338→import androidx.compose.material3.MaterialTheme
+   339→import androidx.compose.material3.darkColorScheme
+   340→import androidx.compose.material3.dynamicDarkColorScheme
+   341→import androidx.compose.material3.dynamicLightColorScheme
+   342→import androidx.compose.material3.lightColorScheme
+   343→import androidx.compose.runtime.Composable
+   344→import androidx.compose.ui.graphics.Color
+   345→import androidx.compose.ui.platform.LocalContext
+   346→
+   347→private val DarkColorScheme = darkColorScheme(
+   348→    primary = Color(0xFF6750A4),
+   349→    secondary = Color(0xFF625B71),
+   350→    tertiary = Color(0xFF7D5260),
+   351→)
+   352→
+   353→private val LightColorScheme = lightColorScheme(
+   354→    primary = Color(0xFF6750A4),
+   355→    secondary = Color(0xFF625B71),
+   356→    tertiary = Color(0xFF7D5260),
+   357→)
+   358→
+   359→@Composable
+   360→fun PavanTheme(
+   361→    darkTheme: Boolean = isSystemInDarkTheme(),
+   362→    dynamicColor: Boolean = true,
+   363→    content: @Composable () -> Unit
+   364→) {
+   365→    val colorScheme = when {
+   366→        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+   367→            val context = LocalContext.current
+   368→            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+   369→        }
+   370→        darkTheme -> DarkColorScheme
+   371→        else -> LightColorScheme
+   372→    }
+   373→    MaterialTheme(
+   374→        colorScheme = colorScheme,
+   375→        content = content
+   376→    )
+   377→}
+   378→`,
+   379→  });
+   380→
+   381→  // ---- data/local/<Entity>Entity.kt ----
+   382→  // Always generate the data class. When Room is enabled, add @Entity + @PrimaryKey
+   383→  // annotations; when disabled, it's a plain data class used for in-memory state.
+   384→  {
+   385→    files.push({
+   386→      path: `app/src/main/java/${pkgPath}/data/local/${entity}Entity.kt`,
+   387→      language: "kotlin",
+   388→      content: `package ${pkgName}.data.local
+   389→${useRoom ? `
+   390→import androidx.room.Entity
+   391→import androidx.room.PrimaryKey
+   392→` : ""}/**
+   393→ * ${entity} data model.${useRoom ? " Room entity (offline-first persistence)." : " In-memory model (no persistence layer)."}
+   394→ */
+   395→${useRoom ? `@Entity(tableName = "${entityRoute}s")
+   396→` : ""}data class ${entity}Entity(
+   397→    ${useRoom ? "@PrimaryKey " : ""}val id: String = java.util.UUID.randomUUID().toString(),
+   398→    val name: String,
+   399→    val description: String? = null,
+   400→    val quantity: Int = 0,
+   401→    val price: Double = 0.0,
+   402→    val createdAt: Long = System.currentTimeMillis(),
+   403→    val updatedAt: Long = System.currentTimeMillis(),
+   404→)
+   405→`,
+   406→    });
+   407→  }
+   408→
+   409→  // ---- Room DAO + Database + Repository (only when offline-sync) ----
+   410→  if (useRoom) {
+   411→    files.push({
+   412→      path: `app/src/main/java/${pkgPath}/data/local/${entity}Dao.kt`,
+   413→      language: "kotlin",
+   414→      content: `package ${pkgName}.data.local
+   415→
+   416→import androidx.room.*
+   417→import kotlinx.coroutines.flow.Flow
+   418→
+   419→@Dao
+   420→interface ${entity}Dao {
+   421→    @Query("SELECT * FROM ${entityRoute}s ORDER BY createdAt DESC")
+   422→    fun getAll(): Flow<List<${entity}Entity>>
+   423→
+   424→    @Insert
+   425→    suspend fun insert(item: ${entity}Entity)
+   426→
+   427→    @Update
+   428→    suspend fun update(item: ${entity}Entity)
+   429→
+   430→    @Delete
+   431→    suspend fun delete(item: ${entity}Entity)
+   432→
+   433→    @Query("DELETE FROM ${entityRoute}s WHERE id = :id")
+   434→    suspend fun deleteById(id: String)
+   435→}
+   436→`,
+   437→    });
+   438→
+   439→    files.push({
+   440→      path: `app/src/main/java/${pkgPath}/data/local/AppDatabase.kt`,
+   441→      language: "kotlin",
+   442→      content: `package ${pkgName}.data.local
+   443→
+   444→import androidx.room.Database
+   445→import androidx.room.RoomDatabase
+   446→
+   447→@Database(entities = [${entity}Entity::class], version = 1, exportSchema = false)
+   448→abstract class AppDatabase : RoomDatabase() {
+   449→    abstract fun ${entityLower}Dao(): ${entity}Dao
+   450→}
+   451→`,
+   452→    });
+   453→
+   454→    // ---- data/repository/<Entity>Repository.kt ----
+   455→    files.push({
+   456→      path: `app/src/main/java/${pkgPath}/data/repository/${entity}Repository.kt`,
+   457→      language: "kotlin",
+   458→      content: `package ${pkgName}.data.repository
+   459→
+   460→import ${pkgName}.data.local.${entity}Dao
+   461→import ${pkgName}.data.local.${entity}Entity
+   462→import kotlinx.coroutines.flow.Flow
+   463→import javax.inject.Inject
+   464→import javax.inject.Singleton
+   465→
+   466→@Singleton
+   467→class ${entity}Repository @Inject constructor(
+   468→    private val dao: ${entity}Dao
+   469→) {
+   470→    fun getAll(): Flow<List<${entity}Entity>> = dao.getAll()
+   471→
+   472→    suspend fun insert(item: ${entity}Entity) = dao.insert(item)
+   473→
+   474→    suspend fun update(item: ${entity}Entity) = dao.update(item)
+   475→
+   476→    suspend fun delete(item: ${entity}Entity) = dao.delete(item)
+   477→
+   478→    suspend fun deleteById(id: String) = dao.deleteById(id)
+   479→}
+   480→`,
+   481→    });
+   482→
+   483→    // ---- di/AppModule.kt (Hilt) ----
+   484→    files.push({
+   485→      path: `app/src/main/java/${pkgPath}/di/AppModule.kt`,
+   486→      language: "kotlin",
+   487→      content: `package ${pkgName}.di
+   488→
+   489→import android.content.Context
+   490→import androidx.room.Room
+   491→import ${pkgName}.data.local.AppDatabase
+   492→import ${pkgName}.data.local.${entity}Dao
+   493→import ${pkgName}.data.repository.${entity}Repository
+   494→import dagger.Module
+   495→import dagger.Provides
+   496→import dagger.hilt.InstallIn
+   497→import dagger.hilt.android.qualifiers.ApplicationContext
+   498→import dagger.hilt.components.SingletonComponent
+   499→import javax.inject.Singleton
+   500→
+   501→@Module
+   502→@InstallIn(SingletonComponent::class)
+   503→object AppModule {
+   504→
+   505→    @Provides
+   506→    @Singleton
+   507→    fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
+   508→        Room.databaseBuilder(context, AppDatabase::class.java, "${pkg}.db")
+   509→            .fallbackToDestructiveMigration()
+   510→            .build()
+   511→
+   512→    @Provides
+   513→    fun provide${entity}Dao(db: AppDatabase): ${entity}Dao = db.${entityLower}Dao()
+   514→
+   515→    @Provides
+   516→    @Singleton
+   517→    fun provide${entity}Repository(dao: ${entity}Dao): ${entity}Repository = ${entity}Repository(dao)
+   518→}
+   519→`,
+   520→    });
+   521→  }
+   522→
+   523→  // ---- ui/screens/<Entity>ViewModel.kt ----
+   524→  files.push({
+   525→    path: `app/src/main/java/${pkgPath}/ui/screens/${entity}ViewModel.kt`,
+   526→    language: "kotlin",
+   527→    content: `package ${pkgName}.ui.screens
+   528→
+   529→import androidx.lifecycle.ViewModel
+   530→import androidx.lifecycle.viewModelScope
+   531→import ${pkgName}.data.local.${entity}Entity
+   532→${useRoom ? `import ${pkgName}.data.repository.${entity}Repository
+   533→import dagger.hilt.android.lifecycle.HiltViewModel
+   534→import javax.inject.Inject` : ""}
+   535→import kotlinx.coroutines.flow.*
+   536→import kotlinx.coroutines.launch
+   537→
+   538→${useRoom ? `@HiltViewModel
+   539→class ${entity}ViewModel @Inject constructor(
+   540→    private val repository: ${entity}Repository
+   541→) : ViewModel() {` : `class ${entity}ViewModel : ViewModel() {`}
+   542→
+   543→    private val _items = MutableStateFlow<List<${entity}Entity>>(emptyList())
+   544→    val items: StateFlow<List<${entity}Entity>> = _items.asStateFlow()
+   545→
+   546→    private val _name = MutableStateFlow("")
+   547→    val name: StateFlow<String> = _name.asStateFlow()
+   548→
+   549→    private val _quantity = MutableStateFlow(0)
+   550→    val quantity: StateFlow<Int> = _quantity.asStateFlow()
+   551→
+   552→    private val _price = MutableStateFlow(0.0)
+   553→    val price: StateFlow<Double> = _price.asStateFlow()
+   554→
+   555→    init {
+   556→${useRoom ? `        viewModelScope.launch {
+   557→            repository.getAll().collect { items ->
+   558→                _items.value = items
+   559→            }
+   560→        }` : `        // No persistence layer; items stay in memory`}
+   561→    }
+   562→
+   563→    fun onNameChange(value: String) { _name.value = value }
+   564→    fun onQuantityChange(value: Int) { _quantity.value = value }
+   565→    fun onPriceChange(value: Double) { _price.value = value }
+   566→
+   567→    fun addItem() {
+   568→        val name = _name.value.trim()
+   569→        if (name.isEmpty()) return
+   570→        val item = ${entity}Entity(
+   571→            name = name,
+   572→            quantity = _quantity.value,
+   573→            price = _price.value,
+   574→        )
+   575→${useRoom ? `        viewModelScope.launch { repository.insert(item) }` : `        _items.value = listOf(item) + _items.value`}
+   576→        _name.value = ""
+   577→        _quantity.value = 0
+   578→        _price.value = 0.0
+   579→    }
+   580→
+   581→    fun deleteItem(item: ${entity}Entity) {
+   582→${useRoom ? `        viewModelScope.launch { repository.delete(item) }` : `        _items.value = _items.value.filter { it.id != item.id }`}
+   583→    }
+   584→}
+   585→`,
+   586→  });
+   587→
+   588→  // ---- ui/screens/InventoryListScreen.kt ----
+   589→  files.push({
+   590→    path: `app/src/main/java/${pkgPath}/ui/screens/${entity}ListScreen.kt`,
+   591→    language: "kotlin",
+   592→    content: `package ${pkgName}.ui.screens
+   593→
+   594→import androidx.compose.foundation.layout.*
+   595→import androidx.compose.foundation.lazy.LazyColumn
+   596→import androidx.compose.foundation.lazy.items
+   597→import androidx.compose.material.icons.Icons
+   598→import androidx.compose.material.icons.filled.Delete
+   599→import androidx.compose.material3.*
+   600→import androidx.compose.runtime.*
+   601→import androidx.compose.ui.Alignment
+   602→import androidx.compose.ui.Modifier
+   603→import androidx.compose.ui.unit.dp
+   604→import ${pkgName}.data.local.${entity}Entity
+   605→${useRoom ? `import androidx.hilt.navigation.compose.hiltViewModel` : ""}
+   606→
+   607→@Composable
+   608→fun ${entity}ListScreen(
+   609→    viewModel: ${entity}ViewModel = ${useRoom ? "hiltViewModel()" : "${entity}ViewModel()"}
+   610→) {
+   611→    val items by viewModel.items.collectAsState()
+   612→    val name by viewModel.name.collectAsState()
+   613→    val quantity by viewModel.quantity.collectAsState()
+   614→    val price by viewModel.price.collectAsState()
+   615→
+   616→    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+   617→        Text(
+   618→            text = "${entity}",
+   619→            style = MaterialTheme.typography.headlineMedium,
+   620→            modifier = Modifier.padding(bottom = 16.dp)
+   621→        )
+   622→
+   623→        // Add form
+   624→        Row(
+   625→            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+   626→            horizontalArrangement = Arrangement.spacedBy(8.dp),
+   627→            verticalAlignment = Alignment.CenterVertically
+   628→        ) {
+   629→            OutlinedTextField(
+   630→                value = name,
+   631→                onValueChange = viewModel::onNameChange,
+   632→                label = { Text("Name") },
+   633→                modifier = Modifier.weight(1f),
+   634→                singleLine = true
+   635→            )
+   636→            OutlinedTextField(
+   637→                value = quantity.toString(),
+   638→                onValueChange = { viewModel.onQuantityChange(it.toIntOrNull() ?: 0) },
+   639→                label = { Text("Qty") },
+   640→                modifier = Modifier.width(80.dp),
+   641→                singleLine = true
+   642→            )
+   643→            OutlinedTextField(
+   644→                value = price.toString(),
+   645→                onValueChange = { viewModel.onPriceChange(it.toDoubleOrNull() ?: 0.0) },
+   646→                label = { Text("Price") },
+   647→                modifier = Modifier.width(100.dp),
+   648→                singleLine = true
+   649→            )
+   650→            Button(onClick = viewModel::addItem) {
+   651→                Text("Add")
+   652→            }
+   653→        }
+   654→
+   655→        // List
+   656→        LazyColumn(
+   657→            modifier = Modifier.fillMaxSize(),
+   658→            verticalArrangement = Arrangement.spacedBy(8.dp)
+   659→        ) {
+   660→            items(items, key = { it.id }) { item ->
+   661→                ${entity}Card(item = item, onDelete = { viewModel.deleteItem(item) })
+   662→            }
+   663→        }
+   664→    }
+   665→}
+   666→
+   667→@Composable
+   668→private fun ${entity}Card(item: ${entity}Entity, onDelete: () -> Unit) {
+   669→    Card(
+   670→        modifier = Modifier.fillMaxWidth(),
+   671→        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+   672→    ) {
+   673→        Row(
+   674→            modifier = Modifier.fillMaxWidth().padding(16.dp),
+   675→            horizontalArrangement = Arrangement.SpaceBetween,
+   676→            verticalAlignment = Alignment.CenterVertically
+   677→        ) {
+   678→            Column(modifier = Modifier.weight(1f)) {
+   679→                Text(text = item.name, style = MaterialTheme.typography.titleMedium)
+   680→                Spacer(modifier = Modifier.height(4.dp))
+   681→                Text(
+   682→                    text = "Qty: \\${'$'}{item.quantity}  •  Price: \\${'$'}{String.format("%.2f", item.price)}",
+   683→                    style = MaterialTheme.typography.bodyMedium,
+   684→                    color = MaterialTheme.colorScheme.onSurfaceVariant
+   685→                )
+   686→                if (item.description != null) {
+   687→                    Text(
+   688→                        text = item.description,
+   689→                        style = MaterialTheme.typography.bodySmall,
+   690→                        color = MaterialTheme.colorScheme.onSurfaceVariant
+   691→                    )
+   692→                }
+   693→            }
+   694→            IconButton(onClick = onDelete) {
+   695→                Icon(Icons.Default.Delete, contentDescription = "Delete")
+   696→            }
+   697→        }
+   698→    }
+   699→}
+   700→`,
+   701→  });
+   702→
+   703→  // ---- ui/screens/OverviewScreen.kt ----
+   704→  files.push({
+   705→    path: `app/src/main/java/${pkgPath}/ui/screens/OverviewScreen.kt`,
+   706→    language: "kotlin",
+   707→    content: `package ${pkgName}.ui.screens
+   708→
+   709→import androidx.compose.foundation.layout.*
+   710→import androidx.compose.material3.*
+   711→import androidx.compose.runtime.*
+   712→import androidx.compose.ui.Alignment
+   713→import androidx.compose.ui.Modifier
+   714→import androidx.compose.ui.unit.dp
+   715→
+   716→@Composable
+   717→fun OverviewScreen(
+   718→    onNavigateTo${entity}: () -> Unit
+   719→) {
+   720→    Column(
+   721→        modifier = Modifier.fillMaxSize().padding(16.dp),
+   722→        verticalArrangement = Arrangement.spacedBy(16.dp)
+   723→    ) {
+   724→        Text(
+   725→            text = "${projectName}",
+   726→            style = MaterialTheme.typography.headlineMedium
+   727→        )
+   728→        Text(
+   729→            text = "Welcome to your generated Android app.",
+   730→            style = MaterialTheme.typography.bodyLarge,
+   731→            color = MaterialTheme.colorScheme.onSurfaceVariant
+   732→        )
+   733→
+   734→        Card(
+   735→            modifier = Modifier.fillMaxWidth(),
+   736→            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+   737→        ) {
+   738→            Column(modifier = Modifier.padding(16.dp)) {
+   739→                Text("${entity} Management", style = MaterialTheme.typography.titleMedium)
+   740→                Spacer(modifier = Modifier.height(8.dp))
+   741→                Text(
+   742→                    "View, add, and delete ${entityRoute} records.",
+   743→                    style = MaterialTheme.typography.bodyMedium,
+   744→                    color = MaterialTheme.colorScheme.onSurfaceVariant
+   745→                )
+   746→                Spacer(modifier = Modifier.height(12.dp))
+   747→                Button(onClick = onNavigateTo${entity}) {
+   748→                    Text("Open ${entity}")
+   749→                }
+   750→            }
+   751→        }
+   752→    }
+   753→}
+   754→`,
+   755→  });
+   756→
+   757→  // ---- res/values/strings.xml ----
+   758→  files.push({
+   759→    path: `app/src/main/res/values/strings.xml`,
+   760→    language: "xml",
+   761→    content: `<resources>
+   762→    <string name="app_name">${projectName}</string>
+   763→</resources>
+   764→`,
+   765→  });
+   766→
+   767→  // ---- res/values/themes.xml ----
+   768→  files.push({
+   769→    path: `app/src/main/res/values/themes.xml`,
+   770→    language: "xml",
+   771→    content: `<?xml version="1.0" encoding="utf-8"?>
+   772→<resources>
+   773→    <style name="Theme.${appName}" parent="android:Theme.Material.Light.NoActionBar" />
+   774→</resources>
+   775→`,
+   776→  });
+   777→
+   778→  // ---- gradle.properties ----
+   779→  files.push({
+   780→    path: `gradle.properties`,
+   781→    language: "properties",
+   782→    content: `org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+   783→android.useAndroidX=true
+   784→kotlin.code.style=official
+   785→android.nonTransitiveRClass=true
+   786→`,
+   787→  });
+   788→
+   789→  // ---- gradle wrapper properties ----
+   790→  files.push({
+   791→    path: `gradle/wrapper/gradle-wrapper.properties`,
+   792→    language: "properties",
+   793→    content: `distributionBase=GRADLE_USER_HOME
+   794→distributionPath=wrapper/dists
+   795→distributionUrl=https\\://services.gradle.org/distributions/gradle-8.9-bin.zip
+   796→networkTimeout=10000
+   797→validateDistributionUrl=true
+   798→zipStoreBase=GRADLE_USER_HOME
+   799→zipStorePath=wrapper/dists
+   800→`,
+   801→  });
+   802→
+   803→  // ---- proguard-rules.pro ----
+   804→  files.push({
+   805→    path: `app/proguard-rules.pro`,
+   806→    language: "text",
+   807→    content: `# Add project specific ProGuard rules here.
+   808→-keep class ${pkgName}.data.local.** { *; }
+   809→${usePostgres ? `-keep class ${pkgName}.data.remote.** { *; }\n-keepattributes Signature\n-keepattributes *Annotation*\n` : ""}`,
+   810→  });
+   811→
+   812→  // ---- PostgreSQL branch: Room is local-only, so add a migration note ----
+   813→  // and a Retrofit API service sketch. Android never talks to PostgreSQL
+   814→  // directly — the backend API owns the PG connection. This is the honest
+   815→  // architecture when Architecture Memory says "Database: PostgreSQL".
+   816→  if (usePostgres) {
+   817→    files.push({
+   818→      path: `DATABASE_MIGRATION.md`,
+   819→      language: "markdown",
+   820→      content: `# Database Migration Note — PostgreSQL on Android
+   821→
+   822→Architecture Memory for this project specifies **PostgreSQL** as the database.
+   823→
+   824→## TL;DR
+   825→Room (the persistence library already scaffolded in this app) is **local-only**
+   826→— it wraps SQLite on the device. It cannot connect to a remote PostgreSQL
+   827→server directly. To use PostgreSQL from Android you must:
+   828→
+   829→1. Run a backend API (Next.js / ASP.NET / FastAPI / etc.) that owns the
+   830→   PostgreSQL connection. (Pavan generates this for the **web** or **api**
+   831→   target of the same build — see the sibling workspace.)
+   832→2. From Android, call that backend API via HTTP (Retrofit / Ktor / OkHttp).
+   833→3. Optionally keep Room as an **offline cache** that syncs with the API —
+   834→   this is the recommended "offline-first with remote source of truth"
+   835→   pattern (see the Room + remote mediator docs).
+   836→
+   837→## What this generator did
+   838→- Kept the existing Room layer (${entity}Entity + ${entity}Dao + AppDatabase)
+   839→  as the local cache / offline storage.
+   840→- Added \`app/src/main/java/${pkgPath}/data/remote/RetrofitApiService.kt\` —
+   841→  a Retrofit interface sketch with the standard CRUD endpoints that match
+   842→  the backend API (e.g. \`/api/${entityRoute}s\`).
+   843→
+   844→## What you need to add
+   845→1. **Network security config** — allow cleartext traffic only in debug.
+   846→   Add \`app/src/main/res/xml/network_security_config.xml\` and reference it
+   847→   from the manifest's \`<application>\` tag.
+   848→2. **Retrofit + Moshi dependencies** in \`app/build.gradle.kts\`:
+   849→   \`\`\`kotlin
+   850→   implementation("com.squareup.retrofit2:retrofit:2.11.0")
+   851→   implementation("com.squareup.retrofit2:converter-moshi:2.11.0")
+   852→   implementation("com.squareup.moshi:moshi-kotlin:1.15.1")
+   853→   \`\`\`
+   854→3. **Internet permission** in \`AndroidManifest.xml\`:
+   855→   \`\`\`xml
+   856→   <uses-permission android:name="android.permission.INTERNET" />
+   857→   \`\`\`
+   858→4. **Wire RetrofitApiService into the repository** — fetch from the API,
+   859→   upsert into Room (single source of truth), and observe Room via Flow.
+   860→   Consider \`RemoteMediator\` (Paging 3) for paginated sync.
+   861→
+   862→## Why no direct PostgreSQL driver?
+   863→- No official, maintained JDBC driver ships in a form suitable for Android
+   864→  (JDBC on Android is fragile, leaks threads, and requires embedding PG
+   865→  credentials in the APK — a security antipattern).
+   866→- The platform convention since 2014 is to use a backend API as the data
+   867→  owner; direct DB access from mobile clients is widely considered an
+   868→  anti-pattern.
+   869→
+   870→Generated by Pavan — Autonomous Software Creator.
+   871→`,
+   872→    });
+   873→
+   874→    files.push({
+   875→      path: `app/src/main/java/${pkgPath}/data/remote/RetrofitApiService.kt`,
+   876→      language: "kotlin",
+   877→      content: `package ${pkgName}.data.remote
+   878→
+   879→import ${pkgName}.data.local.${entity}Entity
+   880→import retrofit2.Response
+   881→import retrofit2.http.Body
+   882→import retrofit2.http.DELETE
+   883→import retrofit2.http.GET
+   884→import retrofit2.http.POST
+   885→import retrofit2.http.Path
+   886→import retrofit2.http.Query
+   887→
+   888→/**
+   889→ * Retrofit interface sketch for the backend API that owns the PostgreSQL
+   890→ * connection. Generated because Architecture Memory selected PostgreSQL as the
+   891→ * database — Room (local SQLite) cannot reach PG directly, so this app talks
+   892→ * to the backend over HTTP and uses Room as an offline cache.
+   893→ *
+   894→ * The backend endpoints mirror the ones the Pavan Web Generator emits at
+   895→ * \`/api/${entityRoute}s\` (see the sibling web target). Adjust paths to match
+   896→ * your actual API.
+   897→ *
+   898→ * Wire this into ${entity}Repository:
+   899→ *   1. Inject \`RetrofitApiService\` via Hilt.
+   900→ *   2. On fetch: call \`apiService.getAll()\`, upsert into the DAO, observe DAO
+   901→ *      via Flow (single source of truth).
+   902→ *   3. On write: call the API first; on success, upsert into the DAO. Use a
+   903→ *      work manager / sync adapter for retry-on-failure.
+   904→ */
+   905→interface RetrofitApiService {
+   906→
+   907→    @GET("/api/${entityRoute}s")
+   908→    suspend fun getAll(
+   909→        @Query("page") page: Int = 1,
+   910→        @Query("pageSize") pageSize: Int = 50,
+   911→    ): Response<List<${entity}Entity>>
+   912→
+   913→    @GET("/api/${entityRoute}s/{id}")
+   914→    suspend fun getById(@Path("id") id: String): Response<${entity}Entity>
+   915→
+   916→    @POST("/api/${entityRoute}s")
+   917→    suspend fun create(@Body item: ${entity}Entity): Response<${entity}Entity>
+   918→
+   919→    @POST("/api/${entityRoute}s/{id}")
+   920→    suspend fun update(@Path("id") id: String, @Body item: ${entity}Entity): Response<${entity}Entity>
+   921→
+   922→    @DELETE("/api/${entityRoute}s/{id}")
+   923→    suspend fun delete(@Path("id") id: String): Response<Unit>
+   924→
+   925→    companion object {
+   926→        // TODO: move to BuildConfig so dev/stage/prod can differ.
+   927→        const val BASE_URL = "http://10.0.2.2:3000/"
+   928→    }
+   929→}
+   930→`,
+   931→    });
+   932→  }
+   933→
+   934→  // ---- README ----
+   935→  files.push({
+   936→    path: `README.md`,
+   937→    language: "markdown",
+   938→    content: `# ${projectName} — Android App
+   939→
+   940→A real Jetpack Compose Android app generated by Pavan's Android Generator (Droid).
+   941→
+   942→## What's included
+   943→- Kotlin + Jetpack Compose (Material 3)
+   944→- Navigation Compose (Overview + ${entity} screens)
+   945→${useRoom ? `- Room database (${entity}Entity + ${entity}Dao + AppDatabase)
+   946→- Hilt DI (AppModule + @HiltAndroidApp)
+   947→- Repository pattern (${entity}Repository)
+   948→` : ""}- ${entity}ViewModel with StateFlow
+   949→- ${entity}ListScreen with LazyColumn + add form + delete
+   950→${usePostgres ? `
+   951→## PostgreSQL note
+   952→Architecture Memory selected PostgreSQL as the project database. Room is
+   953→local-only on Android, so this app talks to the backend API (which owns the
+   954→PG connection) over HTTP. See \`DATABASE_MIGRATION.md\` for the full plan and
+   955→\`app/src/main/java/${pkgPath}/data/remote/RetrofitApiService.kt\` for the
+   956→Retrofit interface sketch.
+   957→` : ""}
+   958→## Build
+   959→\`\`\`bash
+   960→./gradlew assembleDebug
+   961→\`\`\`
+   962→
+   963→## Structure
+   964→- \`app/src/main/java/${pkgPath}/MainActivity.kt\` — NavHost entry
+   965→- \`app/src/main/java/${pkgPath}/ui/screens/${entity}ListScreen.kt\` — CRUD screen
+   966→- \`app/src/main/java/${pkgPath}/ui/screens/OverviewScreen.kt\` — overview
+   967→${useRoom ? `- \`app/src/main/java/${pkgPath}/data/local/\` — Room DB, DAO, Entity
+   968→- \`app/src/main/java/${pkgPath}/data/repository/\` — Repository
+   969→- \`app/src/main/java/${pkgPath}/di/AppModule.kt\` — Hilt module
+   970→` : ""}${usePostgres ? `- \`app/src/main/java/${pkgPath}/data/remote/RetrofitApiService.kt\` — Retrofit API sketch
+   971→- \`DATABASE_MIGRATION.md\` — Android ↔ PostgreSQL migration plan
+   972→` : ""}
+   973→## Min SDK
+   974→- minSdk 26, targetSdk 34, Java 17
+   975→
+   976→Generated by Pavan — Autonomous Software Creator.
+   977→`,
+   978→  });
+   979→
+   980→  void camel;
+   981→  const stackLabel =
+   982→    "Kotlin + Jetpack Compose" +
+   983→    (useRoom ? " + Room + Hilt" : "") +
+   984→    (usePostgres ? " + Retrofit (PG via API)" : "");
+   985→  return registerFiles(files, "android", stackLabel, "android-generator", targetId, "source-code", "generate");
+   986→}
+   987→

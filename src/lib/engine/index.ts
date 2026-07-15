@@ -166,3 +166,73 @@ export {
   getCapabilitySkillMap,
   getSkillFolder,
 } from "./skill-injector";
+
+// WorkspaceIntelligence (Task P) — indexes generated files into 4 graphs
+// (semantic index, symbol graph, dependency graph, architecture graph) so
+// agents can query "what symbols are in this file?" / "what depends on what?"
+// without reading every file. ADDITIVE — does not modify earlier exports.
+export { WorkspaceIntelligence, workspaceIntelligence } from "./workspace-intelligence";
+export type {
+  FileSemanticInfo,
+  Symbol,
+  Dependency,
+  ArchitectureLayer,
+  WorkspaceGraph,
+} from "./workspace-intelligence";
+
+// UnifiedContextBuilder (Task Q) — assembles a MINIMAL, complete context
+// bundle per agent by unifying the four context sources (memory, skills,
+// shared context, workspace graph). Each agent receives ONLY its declared
+// slices — no more, no less. These exports are ADDITIVE.
+export { UnifiedContextBuilder, unifiedContextBuilder } from "./unified-context";
+export type { UnifiedContext } from "./unified-context";
+
+// AgentEventBus (Task O) — a pub/sub event bus for reactive agent scheduling.
+// Agents publish events when they produce work; other agents subscribe to
+// event types and are notified asynchronously. This complements the
+// SharedContext blackboard (synchronous data plane) with an asynchronous
+// control plane so the orchestrator doesn't have to hardcode every
+// inter-agent dependency — the Reviewer simply subscribes to "code-generated"
+// and auto-activates when code is ready. These exports are ADDITIVE and do
+// not modify any Task I / Task J / Task K / Task L symbols above.
+export { AgentEventBus, agentEventBus, registerDefaultSubscriptions } from "./event-bus";
+export type { AgentEvent, AgentEventHandler, AgentSubscription } from "./event-bus";
+
+// Plugin System (Task S) — allows adding agents, skills, tools, and platform
+// adapters WITHOUT modifying the core engine. A plugin is a self-contained
+// module under src/lib/engine/plugins/*/index.ts that calls
+// `loadPlugin(manifest, register)` at import time. `loadAllPlugins()` discovers
+// and imports every built-in plugin, triggering their side-effecting
+// registration against the shared `pluginRegistry`. These exports are
+// ADDITIVE and do not modify any core engine file (orchestrator, runtime,
+// handlers, generators, etc.).
+export type {
+  PluginRegistry,
+  PluginManifest,
+  PluginContribution,
+  PluginContributionType,
+  PluginAgentMetadata,
+  PluginSkillInput,
+  PluginToolInput,
+  PluginPlatformAdapterInput,
+  LoadedPlugin,
+} from "./plugin-system";
+export {
+  pluginRegistry,
+  loadPlugin,
+  loadAllPlugins,
+  getPluginSummary,
+} from "./plugin-system";
+import { loadAllPlugins } from "./plugin-system";
+
+// Eagerly load built-in plugins on the CLIENT at module init (non-blocking).
+// On the SERVER, plugin loading is deferred to the /api/debug/plugins
+// endpoint (and any future orchestrator integration that consumes
+// plugin-contributed handlers) so module import stays cheap and side
+// effects only run when needed.
+if (typeof window !== "undefined") {
+  loadAllPlugins().catch(() => {
+    // Plugin load failures are non-fatal — the core engine still works
+    // without plugin contributions.
+  });
+}
