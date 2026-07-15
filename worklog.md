@@ -2329,3 +2329,41 @@ Stage Summary:
 - Source field: render endpoint returns `"artifact-registry"` when the registry lists a UI file AND that file is readable on disk; returns `"filesystem"` when the registry is empty OR the registry-listed file is missing on disk (V1 walk fallback). Interact endpoint returns `"artifact-registry"` when the global registry has ANY UI artifact for the target; returns `"default"` otherwise.
 - Backward compat: PRESERVED. The V1 filesystem walk (`findMainUiFile` + `findCodeBehind`) is unchanged and runs whenever the V2 path doesn't yield a usable file. Pre-Wave-3B callers see the same `target`/`file`/`html`/`css` fields plus a new additive `source` field. No existing API contract broken.
 - Blockers: none. The interact endpoint's `source` is a global registry probe (not per-project) because ArtifactRecord has no `projectId` field — documented in the helper's docstring. A future wave could add `projectId` to ArtifactRecord for per-project filtering, but that would require touching artifact-registry.ts (Wave 3A ownership).
+
+---
+Task ID: Runtime V2 Complete (Waves 1-4)
+Agent: Z.ai Code (main)
+Task: Refactor runtime into final autonomous architecture per RUNTIME_V2_AUDIT.md
+
+Work Log:
+- (1) Produced full architecture audit + gap analysis + migration plan (RUNTIME_V2_AUDIT.md)
+- (2) Executed 4 waves of incremental refactoring (13 subagent tasks total)
+- (3) All waves backward compatible — regression 5/5 PASSED throughout
+
+Stage Summary — RUNTIME V2 REFACTORING COMPLETE:
+
+Wave 1 (Foundation):
+- TaskGraph: mutable DAG with insert() for dynamic task insertion
+- Sandbox: 7 execution profiles wrapping ToolManager
+- Agent Teams: 6 teams grouping all 70 agents
+- Verification Loop: generate→build→verify→fix cycle with retry tracking
+
+Wave 2 (Slimming):
+- Orchestrator: 653→383 lines (41% reduction), business logic moved to WorkflowEngine
+- Context Exclusivity: MemoryAccess facade, 4 modules migrated from direct projectMemory
+- Event-Driven Runtime: reactive subscribers submit follow-up tasks (code-generated→build task)
+
+Wave 3 (Store + Preview):
+- Artifact Store: queryable with query/byType/byTarget/lineageGraph
+- Preview: consumes artifacts first, filesystem fallback
+
+Wave 4 (Polish):
+- Workflows: 8 workflows with regex-based selection
+- Skills→Tools: 22 skills mapped to tool recommendations, Model Router integrated
+- Runtime Metrics: 9 categories (utilization, parallelism, latency p50/p95, memory, tokens, cache, graph queries, verification retries)
+
+Architecture transformation achieved:
+  OLD: Orchestrator (653 lines) → direct generator calls → linear pipeline
+  NEW: Thin Orchestrator (383 lines) → WorkflowEngine → TaskGraph (mutable DAG) → ExecutionEngine → AgentRuntime → Agent Teams → Skills+Tools → Sandbox → VerificationLoop → ArtifactStore → Preview
+
+All 19 V2 architecture points addressed. Committed as ae1c23c, pushed to origin/main.
