@@ -180,6 +180,20 @@ export type {
   WorkspaceGraph,
 } from "./workspace-intelligence";
 
+// WorkspaceReasoning (Task W) — deeper analysis capabilities built on top of
+// the 4-graph workspace intelligence: semantic search, impact analysis,
+// architecture validation, dependency recommendations, dead-code detection.
+// These exports are ADDITIVE and do not modify any earlier symbols.
+export { WorkspaceReasoning, workspaceReasoning } from "./workspace-reasoning";
+export type {
+  SemanticSearchResult,
+  ImpactAnalysis,
+  ArchitectureValidation,
+  ArchitectureViolation,
+  DependencyRecommendation,
+  DeadCodeReport,
+} from "./workspace-reasoning";
+
 // UnifiedContextBuilder (Task Q) — assembles a MINIMAL, complete context
 // bundle per agent by unifying the four context sources (memory, skills,
 // shared context, workspace graph). Each agent receives ONLY its declared
@@ -225,6 +239,37 @@ export {
 } from "./plugin-system";
 import { loadAllPlugins } from "./plugin-system";
 
+// Agent Collaboration Engine (Task U) — enables agents to critique and
+// refine each other's outputs through structured negotiation rounds. Three
+// patterns: critique-refine (producer ↔ critic, up to N rounds), peer
+// review (two agents review each other), and consensus (multiple voters
+// choose between discrete options). These exports are ADDITIVE and do not
+// modify any core engine file (orchestrator, runtime, handlers,
+// generators, memories, shared-context, etc.).
+export {
+  AgentCollaborationEngine,
+  collaborationEngine,
+  criticHandlers,
+} from "./agent-collaboration";
+export type {
+  Critique,
+  CritiqueIssue,
+  CollaborationRound,
+  CollaborationResult,
+  CollaborationConfig,
+} from "./agent-collaboration";
+
+// Project Evolution (Task Y) — snapshot/restore/analyze/track for continuous
+// evolution. Enables Nirman to reopen an existing project months later,
+// understand its architecture, and continue evolving it without losing prior
+// design decisions. ADDITIVE — does not modify any earlier exports.
+export { ProjectEvolution, projectEvolution } from "./project-evolution";
+export type {
+  ProjectSnapshot,
+  EvolutionDiff,
+  ArchitectureUnderstanding,
+} from "./project-evolution";
+
 // Eagerly load built-in plugins on the CLIENT at module init (non-blocking).
 // On the SERVER, plugin loading is deferred to the /api/debug/plugins
 // endpoint (and any future orchestrator integration that consumes
@@ -236,3 +281,11 @@ if (typeof window !== "undefined") {
     // without plugin contributions.
   });
 }
+
+// Planning Hierarchy (Task V) — 4-level hierarchical planning
+// (Project -> Feature -> Module -> Task). Makes large multi-feature projects
+// (e.g. "CRM with contacts, deals, pipeline, activities, reports") manageable
+// by systematically decomposing them into a structured DAG. ADDITIVE — does
+// not modify the existing single-level planner agent in agent-handlers.ts.
+export { PlanningHierarchy, planningHierarchy } from "./planning-hierarchy";
+export type { ProjectPlan, FeaturePlan, ModulePlan, TaskSpec } from "./planning-hierarchy";

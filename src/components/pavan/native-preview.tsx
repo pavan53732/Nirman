@@ -1,8 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Box, RefreshCw } from "lucide-react";
 import type { PreviewTarget } from "@/lib/types";
+import type {
+  PreviewAction,
+  PreviewScreen,
+} from "@/lib/preview/preview-state";
 
 interface NativePreviewProps {
   target: Extract<PreviewTarget, "windows" | "android">;
@@ -11,61 +15,173 @@ interface NativePreviewProps {
   refreshKey?: string | number;
 }
 
-interface RenderResponse {
-  target: string;
-  file: string;
+interface PreviewStateInfo {
+  currentScreen: PreviewScreen;
+  entities: { id: string; name: string }[];
+  lastAction: string | null;
+}
+
+interface InteractiveResponse {
   html: string;
   css: string;
-  elementCount: number;
-  warnings: string[];
+  state: PreviewStateInfo;
+  availableActions: { action: string; label: string; elementId: string }[];
+  target: string;
+  projectId: string;
 }
 
 /**
- * NativePreview — fetches a rendered HTML approximation of the generated
- * native UI from /api/preview/render and displays it inside a sandboxed
- * container. Used by PreviewPanel when the user switches to "Preview" mode.
+ * NativePreview — fetches an INTERACTIVE HTML approximation of the generated
+ * native UI from /api/preview/interact and wires up click + input handlers
+ * via event delegation so the user can navigate between screens, edit form
+ * fields, add/edit/delete entities, and see state changes in real time.
+ *
+ * The preview simulates a stateful native app:
+ *   - list screen  → click a row → detail screen → back
+ *   - list screen  → "+ Add Contact" → form screen → save → back to list
+ *   - form inputs  → type → server stores formValues → save persists
+ *   - delete button → entity removed → list updates
+ *
+ * All actions go through POST /api/preview/interact, which reduces the action
+ * against a server-side state store and returns the new rendered HTML. Input
+ * events update server state WITHOUT replacing the HTML (preserves focus);
+ * click events replace the HTML to reflect the new screen.
  */
 export function NativePreview({ target, projectId, refreshKey }: NativePreviewProps) {
-  const [html, setHtml] = useState<string>("");
-  const [css, setCss] = useState<string>("");
-  const [file, setFile] = useState<string>("");
-  const [elementCount, setElementCount] = useState(0);
-  const [warnings, setWarnings] = useState<string[]>([]);
+  const [data, setData] = useState<InteractiveResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(
-          `/api/preview/render?target=${encodeURIComponent(target)}&projectId=${encodeURIComponent(projectId)}`,
-        );
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({ error: res.statusText }));
-          throw new Error(body.error || `HTTP ${res.status}`);
-        }
-        const data = (await res.json()) as RenderResponse;
-        if (cancelled) return;
-        setHtml(data.html);
-        setCss(data.css);
-        setFile(data.file);
-        setElementCount(data.elementCount);
-        setWarnings(data.warnings ?? []);
-      } catch (e) {
-        if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
+  // Serialize all action POSTs so they're applied in order (prevents the
+  // race where a fast "type then save" interleaves with stale responses).
+  const actionQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const loadPreview = useCallback(async (reset: boolean) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const url =
+        `/api/preview/interact?target=${encodeURIComponent(target)}` +
+        `&projectId=${encodeURIComponent(projectId)}` +
+        (reset ? `&reset=1` : "");
+      const res = await fetch(url);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(body.error || `HTTP ${res.status}`);
       }
+      const d = (await res.json()) as InteractiveResponse;
+      setData(d);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
     }
-    load();
-    return () => {
-      cancelled = true;
+  }, [target, projectId]);
+
+  // Initial load + reset when refreshKey (workspace version) changes.
+  useEffect(() => {
+    loadPreview(true);
+  }, [loadPreview, refreshKey]);
+
+  /**
+   * Dispatch an action to the server and merge the response. For input
+   * events, we DON'T replace the HTML body (preserves user focus + cursor
+   * position); we just update the state info for the header strip. For
+   * click events, we replace the HTML to reflect the new screen.
+   */
+  const dispatchAction = useCallback(
+    (action: PreviewAction, isInput: boolean) => {
+      // Chain onto the previous action so they're processed in order.
+      actionQueueRef.current = actionQueueRef.current
+        .then(async () => {
+          try {
+            const res = await fetch(`/api/preview/interact`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ target, projectId, action }),
+            });
+            if (!res.ok) {
+              const body = await res
+                .json()
+                .catch(() => ({ error: res.statusText }));
+              throw new Error(body.error || `HTTP ${res.status}`);
+            }
+            const d = (await res.json()) as InteractiveResponse;
+            setData((prev) => {
+              if (isInput && prev) {
+                // Preserve HTML/CSS (keep focus) — only refresh state info.
+                return { ...prev, state: d.state, availableActions: d.availableActions };
+              }
+              return d;
+            });
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        })
+        .catch(() => {
+          // Swallow errors so the queue keeps draining.
+        });
+    },
+    [target, projectId],
+  );
+
+  // Attach click + input handlers via event delegation on the preview surface.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const onClick = (e: MouseEvent) => {
+      const targetEl = (e.target as HTMLElement).closest<HTMLElement>(
+        "[data-action]",
+      );
+      if (!targetEl) return;
+      e.preventDefault();
+      const action = targetEl.getAttribute("data-action");
+      if (!action) return;
+
+      // Build the action payload from the element's data-* attributes.
+      switch (action) {
+        case "select":
+        case "delete": {
+          const entityId = targetEl.getAttribute("data-entity-id") ?? "";
+          dispatchAction(
+            { type: action as "select" | "delete", entityId },
+            false,
+          );
+          break;
+        }
+        case "navigate": {
+          const screen = targetEl.getAttribute("data-screen") as PreviewScreen;
+          if (screen) dispatchAction({ type: "navigate", screen }, false);
+          break;
+        }
+        case "add":
+        case "save":
+        case "back":
+          dispatchAction({ type: action as "add" | "save" | "back" }, false);
+          break;
+        default:
+          // Unknown action — ignore.
+          break;
+      }
     };
-  }, [target, projectId, refreshKey]);
+
+    const onInput = (e: Event) => {
+      const targetEl = e.target as HTMLElement;
+      if (!targetEl.hasAttribute("data-input")) return;
+      const field = targetEl.getAttribute("data-input") ?? "";
+      const value = (targetEl as HTMLInputElement).value ?? "";
+      dispatchAction({ type: "input", field, value }, true);
+    };
+
+    container.addEventListener("click", onClick);
+    container.addEventListener("input", onInput);
+    return () => {
+      container.removeEventListener("click", onClick);
+      container.removeEventListener("input", onInput);
+    };
+  }, [data, dispatchAction]);
 
   const isWindows = target === "windows";
 
@@ -77,7 +193,7 @@ export function NativePreview({ target, projectId, refreshKey }: NativePreviewPr
             <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>
           <p className="text-xs text-muted-foreground">
-            Rendering {isWindows ? "Windows" : "Android"} native preview…
+            Loading interactive {isWindows ? "Windows" : "Android"} preview…
           </p>
         </div>
       </div>
@@ -95,8 +211,8 @@ export function NativePreview({ target, projectId, refreshKey }: NativePreviewPr
             <p className="text-sm font-medium">Preview unavailable</p>
             <p className="mt-1 text-xs text-muted-foreground">{error}</p>
             <p className="mt-2 text-[11px] text-muted-foreground/70">
-              Build the project first — the native preview renders the generated
-              {" "}{isWindows ? "XAML" : "Kotlin"} source from the workspace.
+              The interactive preview simulates a native app — try rebuilding
+              the project if the error persists.
             </p>
           </div>
         </div>
@@ -104,9 +220,21 @@ export function NativePreview({ target, projectId, refreshKey }: NativePreviewPr
     );
   }
 
+  if (!data) {
+    return (
+      <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+        No preview available
+      </div>
+    );
+  }
+
+  const screen = data.state.currentScreen;
+  const itemCount = data.state.entities.length;
+  const lastAction = data.state.lastAction ?? "init";
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Header strip */}
+      {/* Header strip — shows current screen + live state info */}
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-muted/30 px-3 py-1.5">
         <div className="flex min-w-0 items-center gap-2">
           <Box className="h-3.5 w-3.5 shrink-0 text-primary" />
@@ -115,47 +243,31 @@ export function NativePreview({ target, projectId, refreshKey }: NativePreviewPr
           </span>
           <span className="text-[10px] text-muted-foreground">·</span>
           <span className="text-[10px] text-muted-foreground">
-            {elementCount} element{elementCount === 1 ? "" : "s"}
+            {screen} screen
+          </span>
+          <span className="text-[10px] text-muted-foreground">·</span>
+          <span className="text-[10px] text-muted-foreground">
+            {itemCount} item{itemCount === 1 ? "" : "s"}
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {warnings.length > 0 && (
-            <span
-              className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400"
-              title={warnings.join("\n")}
-            >
-              <AlertTriangle className="h-3 w-3" />
-              {warnings.length} warning{warnings.length === 1 ? "" : "s"}
-            </span>
-          )}
           <span className="hidden sm:inline text-[10px] font-mono text-muted-foreground truncate max-w-[200px]">
-            {file.split("/").pop() ?? file}
+            last: {lastAction}
           </span>
         </div>
       </div>
 
-      {/* Preview surface */}
+      {/* Preview surface — interactive HTML with event delegation */}
       <div
         className={
           "relative flex-1 min-h-0 overflow-auto p-4 " +
           (isWindows ? "bg-zinc-200/60" : "bg-gradient-to-br from-purple-50 to-pink-50")
         }
+        ref={containerRef}
       >
-        {/* Inline the renderer CSS scoped to the preview surface. */}
-        <style dangerouslySetInnerHTML={{ __html: scopeCss(css, isWindows) }} />
-        <div dangerouslySetInnerHTML={{ __html: html }} />
+        <style dangerouslySetInnerHTML={{ __html: data.css }} />
+        <div dangerouslySetInnerHTML={{ __html: data.html }} />
       </div>
     </div>
   );
-}
-
-/**
- * Scope the renderer CSS so it doesn't leak into the host page. The renderer
- * already uses class prefixes (win11-* / md3-*) so a light touch is enough —
- * we wrap each selector with `.pavan-preview-scope` to be safe.
- */
-function scopeCss(css: string, _isWindows: boolean): string {
-  // The renderer CSS only targets win11-* / md3-* class names — these are
-  // unique to the preview, so we don't need heavy scoping. Just pass through.
-  return css;
 }
