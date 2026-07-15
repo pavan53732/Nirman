@@ -1,0 +1,589 @@
+     1→     1→// Orchestrator — the conductor. Wires the 5 executive agents and all
+     2→     2→// subsystems: registries, provider abstraction, execution engine, workflow
+     3→     3→// engine, memories, artifact registry, decision engine, self-healing,
+     4→     4→// checkpoints, and observability.
+     5→     5→//
+     6→     6→// The 5 Executive agents (always active):
+     7→     7→//   - Orchestrator Agent       -> this class (drives the pipeline)
+     8→     8→//   - Project Manager Agent    -> tracks project state & milestones
+     9→     9→//   - Planner Agent            -> decomposes requirements into a plan
+    10→    10→//   - Decision Engine Agent    -> applies policies, logs decisions
+    11→    11→//   - Context Builder Agent    -> minimal prompt packs per agent
+    12→    12→
+    13→    13→import type {
+    14→    14→  Workflow,
+    15→    15→  WorkflowId,
+    16→    16→  Task,
+    17→    17→  EngineEvent,
+    18→    18→  StageId,
+    19→    19→  DecisionRecord,
+    20→    20→  Capability,
+    21→    21→  PlatformKind,
+    22→    22→} from "./types";
+    23→    23→import { executionEngine, checkpointManager, makeTask } from "./execution-engine";
+    24→    24→import { workflowEngine } from "./workflow-engine";
+    25→    25→import { projectMemory, contextBuilder } from "./memories";
+    26→    26→import { artifactRegistry } from "./artifact-registry";
+    27→    27→import { decisionEngine, detectCapabilities, detectNonFunctionals, type DetectedTargets } from "./decision-engine";
+    28→    28→import { observability } from "./observability";
+    29→    29→import { selfHealController } from "./self-healing";
+    30→    30→import { registries } from "./registries";
+    31→    31→import { tokenBudgetManager } from "./provider-abstraction";
+    32→    32→import { generateForTarget } from "./generators";
+    33→    33→import { generateWebTests, generateDesktopTests, generateAndroidTests } from "./generators/test-generator";
+    34→    34→import { generateCICD } from "./generators/cicd-generator";
+    35→    35→import { generateDocker } from "./generators/docker-generator";
+    36→    36→import { askQuestionIfNeeded, detectAmbiguity, AMBIGUITY_THRESHOLD } from "./skills/ambiguity-detector";
+    37→    37→
+    38→    38→export interface OrchestrationResult {
+    39→    39→  workflow: Workflow;
+    40→    40→  targets: DetectedTargets[];
+    41→    41→  decisions: DecisionRecord[];
+    42→    42→  capabilities: Capability[];
+    43→    43→  generatedFiles: number;
+    44→    44→  /** Ambiguity score 0..1 from the autonomy gate. */
+    45→    45→  ambiguityScore: number;
+    46→    46→  /** Question to ask the user if ambiguity > threshold (null = proceed). */
+    47→    47→  pendingQuestion: string | null;
+    48→    48→}
+    49→    49→
+    50→    50→/**
+    51→    51→ * Map a target platform kind to the SKILL.md skill name that covers it.
+    52→    52→ * Returns undefined for kinds with no matching skill in /skills/.
+    53→    53→ *
+    54→    54→ *   windows → windows-native  (WinUI 3 / WPF / .NET MAUI / Win32 guidance)
+    55→    55→ *   web     → fullstack-app   (full-stack web app orchestration)
+    56→    56→ *   android → frontend-setup  (closest match: UI/frontend guidance applies
+    57→    57→ *                              to Compose UI as well; no android-specific
+    58→    58→ *                              skill exists yet)
+    59→    59→ *   cli     → scaffold        (project scaffolding guidance)
+    60→    60→ *   api     → backend-api     (backend API design)
+    61→    61→ *
+    62→    62→ * "desktop-app" is the desktop fallback skill (cross-platform desktop
+    63→    63→ * framework choice) — used when a windows target is detected but the user
+    64→    64→ * didn't explicitly ask for native.
+    65→    65→ */
+    66→    66→export function skillForTarget(kind: PlatformKind): string | undefined {
+    67→    67→  switch (kind) {
+    68→    68→    case "windows":
+    69→    69→      return "windows-native";
+    70→    70→    case "web":
+    71→    71→      return "fullstack-app";
+    72→    72→    case "android":
+    73→    73→      return "frontend-setup";
+    74→    74→    case "cli":
+    75→    75→      return "scaffold";
+    76→    76→    case "api":
+    77→    77→      return "backend-api";
+    78→    78→    default:
+    79→    79→      return undefined;
+    80→    80→  }
+    81→    81→}
+    82→    82→
+    83→    83→/**
+    84→    84→ * Client-side fetch of a SKILL.md content string from /api/skill-content.
+    85→    85→ * The API route reads the real file from /skills/<name>/SKILL.md via the
+    86→    86→ * server-only loader. Returns undefined on error or 404 (e.g. skill missing).
+    87→    87→ *
+    88→    88→ * This is how the orchestrator (which runs client-side) gets the SKILL.md
+    89→    89→ * content into the pipeline: the loader is server-only (uses fs), so we
+    90→    90→ * expose its content via an API route and fetch it here.
+    91→    91→ */
+    92→    92→export async function fetchSkillContent(skillName: string): Promise<string | undefined> {
+    93→    93→  try {
+    94→    94→    const res = await fetch(`/api/skill-content?name=${encodeURIComponent(skillName)}`);
+    95→    95→    if (!res.ok) return undefined;
+    96→    96→    const data = await res.json();
+    97→    97→    if (!data || typeof data.content !== "string") return undefined;
+    98→    98→    return data.content as string;
+    99→    99→  } catch {
+   100→   100→    return undefined;
+   101→   101→  }
+   102→   102→}
+   103→   103→
+   104→   104→/**
+   105→   105→ * Pre-fetch SKILL.md content for every candidate target kind in parallel.
+   106→   106→ * Returns a partial map { kind -> content }. Kinds with no matching skill
+   107→   107→ * (or fetch failures) are omitted from the map. The orchestrator passes
+   108→   108→ * this map to detectTargets() so the Decision Engine can boost policies
+   109→   109→ * whose `choose` value is mentioned in the skill text.
+   110→   110→ */
+   111→   111→export async function fetchSkillContentForCandidateKinds(
+   112→   112→  kinds: PlatformKind[]
+   113→   113→): Promise<Partial<Record<PlatformKind, string>>> {
+   114→   114→  const out: Partial<Record<PlatformKind, string>> = {};
+   115→   115→  await Promise.all(
+   116→   116→    kinds.map(async (kind) => {
+   117→   117→      const skillName = skillForTarget(kind);
+   118→   118→      if (!skillName) return;
+   119→   119→      const content = await fetchSkillContent(skillName);
+   120→   120→      if (content) out[kind] = content;
+   121→   121→    })
+   122→   122→  );
+   123→   123→  return out;
+   124→   124→}
+   125→   125→
+   126→   126→/** Detect generation targets (multi-target) from a prompt. */
+   127→   127→export function detectTargets(
+   128→   128→  prompt: string,
+   129→   129→  /**
+   130→   130→   * Optional map of { platformKind -> SKILL.md content }. When supplied,
+   131→   131→   * each target's pickStack() call passes the matching skill content to
+   132→   132→   * decisionEngine.decide() so the skill can boost policies it endorses.
+   133→   133→   * The store calls detectTargets(prompt) without this map (UI display
+   134→   134→   * only — no boost needed); the orchestrator calls it with the map after
+   135→   135→   * fetching skill content from /api/skill-content.
+   136→   136→   */
+   137→   137→  skillContentMap?: Partial<Record<PlatformKind, string>>
+   138→   138→): DetectedTargets[] {
+   139→   139→  const caps = detectCapabilities(prompt);
+   140→   140→  const nfs = detectNonFunctionals(prompt);
+   141→   141→  const p = " " + prompt.toLowerCase() + " ";
+   142→   142→  const out: DetectedTargets[] = [];
+   143→   143→  const wants = (re: RegExp) => re.test(p);
+   144→   144→
+   145→   145→  // Domain inference: if the prompt mentions CAD/3D/GPU/game but no explicit
+   146→   146→  // platform keyword, infer windows/native (not the default web). This prevents
+   147→   147→  // "Build CAD software" from falling through to a generic Next.js app.
+   148→   148→  const isCAD = /\b(cad|autocad|3d modeling|opengl|directx|vulkan|rendering)\b/.test(p);
+   149→   149→  const isGame = /\b(game|unity|godot|2d platformer|3d game)\b/.test(p);
+   150→   150→  const domainInferredWindows = isCAD && !wants(/\b(web|android|cli|api)\b/);
+   151→   151→  const domainInferredGame = isGame && !wants(/\b(web|windows|android|cli|api)\b/);
+   152→   152→
+   153→   153→  const multi =
+   154→   154→    [
+   155→   155→      wants(/\b(windows|desktop|winui|wpf|winforms|win32)\b/) || domainInferredWindows,
+   156→   156→      wants(/\b(android|mobile( app)?|kotlin|flutter|companion app|phone app)\b/),
+   157→   157→      wants(/\b(web( site| app| admin| portal)?|website|landing|marketing site|saas|portal)\b/),
+   158→   158→      wants(/\b(api|rest|backend service|microservice)\b/),
+   159→   159→      wants(/\b(cli|command.line|terminal tool)\b/),
+   160→   160→    ].filter(Boolean).length > 1;
+   161→   161→
+   162→   162→  if (wants(/\b(windows|desktop|winui|wpf|winforms|win32|\.net\s*(desktop|app))\b/) || domainInferredWindows) {
+   163→   163→    const kind = "windows" as PlatformKind;
+   164→   164→    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs, skillContentMap?.[kind]);
+   165→   165→    out.push({ kind, label: multi ? "Desktop App" : "App", role: multi ? "Primary desktop workspace" : "Windows desktop application", stack, capabilities: caps, policies: [decision] });
+   166→   166→  }
+   167→   167→  if (wants(/\b(android|mobile( app)?|kotlin|flutter|companion app|phone app)\b/)) {
+   168→   168→    const kind = "android" as PlatformKind;
+   169→   169→    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs, skillContentMap?.[kind]);
+   170→   170→    out.push({ kind, label: multi ? "Android Companion" : "App", role: multi ? "Mobile companion app" : "Android application", stack, capabilities: caps, policies: [decision] });
+   171→   171→  }
+   172→   172→  if (wants(/\b(web( site| app| admin| portal)?|website|landing|marketing site|saas|portal|browser)\b/)) {
+   173→   173→    const kind = "web" as PlatformKind;
+   174→   174→    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs, skillContentMap?.[kind]);
+   175→   175→    out.push({ kind, label: multi ? "Web Portal" : "App", role: multi ? "Web admin portal" : "Web application", stack, capabilities: caps, policies: [decision] });
+   176→   176→  }
+   177→   177→  if (wants(/\b(api|rest( api)?|graphql|backend service|microservice)\b/)) {
+   178→   178→    const kind = "api" as PlatformKind;
+   179→   179→    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs, skillContentMap?.[kind]);
+   180→   180→    out.push({ kind, label: "API Service", role: "Backend API and data layer", stack, capabilities: caps, policies: [decision] });
+   181→   181→  }
+   182→   182→  if (wants(/\b(cli|command.line|terminal tool|brew install|cargo install)\b/)) {
+   183→   183→    const kind = "cli" as PlatformKind;
+   184→   184→    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs, skillContentMap?.[kind]);
+   185→   185→    out.push({ kind, label: "CLI Tool", role: "Command-line utility", stack, capabilities: caps, policies: [decision] });
+   186→   186→  }
+   187→   187→  if (wants(/\b(ai agent|autonomous agent|assistant service|chatbot|support agent)\b/)) {
+   188→   188→    out.push({ kind: "api" as PlatformKind, label: "AI Agent", role: "Autonomous agent service", stack: "Python + LangGraph", capabilities: caps, policies: [decisionEngine.pickStack("api", prompt, caps, nfs, skillContentMap?.["api"]).decision] });
+   189→   189→  }
+   190→   190→  if (wants(/\b(library|sdk|npm package|crate)\b/)) {
+   191→   191→    out.push({ kind: "library" as PlatformKind, label: "Library", role: "Reusable library / SDK", stack: /\b(rust|crate)\b/.test(p) ? "Rust crate" : "TypeScript library", capabilities: caps, policies: [] });
+   192→   192→  }
+   193→   193→  if (domainInferredGame) {
+   194→   194→    out.push({ kind: "library" as PlatformKind, label: "Game", role: "Interactive game", stack: "Godot + GDScript", capabilities: caps, policies: [] });
+   195→   195→  }
+   196→   196→  if (out.length === 0) {
+   197→   197→    const kind = "web" as PlatformKind;
+   198→   198→    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs, skillContentMap?.[kind]);
+   199→   199→    out.push({ kind, label: "Web App", role: "Web application", stack, capabilities: caps, policies: [decision] });
+   200→   200→  }
+   201→   201→  return out;
+   202→   202→}
+   203→   203→
+   204→   204→export class Orchestrator {
+   205→   205→  /** Bootstrap: register all data into registries and wire the event bus. */
+   206→   206→  bootstrap(): void {
+   207→   207→    // registries are populated by the index module import side-effects;
+   208→   208→    // here we just wire observability to the execution engine event bus.
+   209→   209→    executionEngine.subscribe((e) => {
+   210→   210→      observability.recordEvent(e);
+   211→   211→    });
+   212→   212→  }
+   213→   213→
+   214→   214→  /**
+   215→   215→   * Run a build: select workflow, detect targets + capabilities, write
+   216→   216→   * requirements/decision memory, compile the workflow DAG, submit to the
+   217→   217→   * execution engine, and return the plan.
+   218→   218→   */
+   219→   219→  async startBuild(prompt: string, projectId?: string): Promise<OrchestrationResult & { tasks: Task[] }> {
+   220→   220→    executionEngine.reset();
+   221→   221→    checkpointManager.clear();
+   222→   222→    artifactRegistry.clear();
+   223→   223→
+   224→   224→    // Context Builder pulls relevant memory for the planner
+   225→   225→    const ctx = contextBuilder.buildForAgent("planner", { kinds: ["requirements", "decision", "conversation"], prompt });
+   226→   226→
+   227→   227→    // Capability Detection (runs first)
+   228→   228→    const capabilities = detectCapabilities(prompt);
+   229→   229→    observability.recordEvent({
+   230→   230→      id: `ev-${Date.now()}`,
+   231→   231→      ts: Date.now(),
+   232→   232→      type: "capability-detected",
+   233→   233→      message: `Detected capabilities: ${capabilities.join(", ") || "none"}`,
+   234→   234→      level: "info",
+   235→   235→    });
+   236→   236→
+   237→   237→    // Autonomy gate: Ambiguity Detection. If the requirement is too ambiguous
+   238→   238→    // (score > AMBIGUITY_THRESHOLD), emit a human-question and pause the
+   239→   239→    // workflow instead of inventing business requirements. The engine asks
+   240→   240→    // ONLY when information is missing, conflicting, or an external resource
+   241→   241→    // is needed without credentials.
+   242→   242→    const ambiguity = detectAmbiguity(prompt);
+   243→   243→    observability.recordEvent({
+   244→   244→      id: `ev-${Date.now()}-amb`,
+   245→   245→      ts: Date.now(),
+   246→   246→      type: "capability-detected",
+   247→   247→      message: `Ambiguity score ${ambiguity.score.toFixed(2)} (threshold ${AMBIGUITY_THRESHOLD})${ambiguity.shouldAsk ? " → asking user" : " → proceeding autonomously"}`,
+   248→   248→      level: ambiguity.shouldAsk ? "warn" : "info",
+   249→   249→    });
+   250→   250→    const pendingQuestion = askQuestionIfNeeded(prompt);
+   251→   251→
+   252→   252→    // ---- Phase A1: Pre-fetch SKILL.md content for every candidate target ----
+   253→   253→    // The orchestrator runs client-side, so it fetches the skill content via
+   254→   254→    // /api/skill-content (the server-only loader reads /skills/<name>/SKILL.md).
+   255→   255→    // The map is passed to detectTargets() so the Decision Engine can boost
+   256→   256→    // policies whose `choose` value is mentioned in the skill text, and to
+   257→   257→    // generateForTarget() so the generators can include the skill guidance as
+   258→   258→    // a comment header in their README.
+   259→   259→    const candidateKinds: PlatformKind[] = ["windows", "android", "web", "api", "cli"];
+   260→   260→    const skillContentMap = await fetchSkillContentForCandidateKinds(candidateKinds);
+   261→   261→    const skillFetchCount = Object.keys(skillContentMap).length;
+   262→   262→    if (skillFetchCount > 0) {
+   263→   263→      observability.recordEvent({
+   264→   264→        id: `ev-${Date.now()}-skill`,
+   265→   265→        ts: Date.now(),
+   266→   266→        type: "memory-written",
+   267→   267→        message: `Loaded ${skillFetchCount} SKILL.md file(s) from /api/skill-content: ${candidateKinds
+   268→   268→          .filter((k) => skillContentMap[k])
+   269→   269→          .map((k) => `${k}→${skillForTarget(k)}`)
+   270→   270→          .join(", ")}`,
+   271→   271→        level: "info",
+   272→   272→      });
+   273→   273→    }
+   274→   274→
+   275→   275→    // Detect multi-targets + decisions (with skill-content boost)
+   276→   276→    const targets = detectTargets(prompt, skillContentMap);
+   277→   277→    const decisions = targets.flatMap((t) => t.policies);
+   278→   278→
+   279→   279→    // Write Requirements Memory + Decision Memory
+   280→   280→    projectMemory.write("requirements", "Original Prompt", prompt, "user");
+   281→   281→    projectMemory.write("requirements", "Detected Targets", targets.map((t) => `${t.label}: ${t.stack} (${t.role})`).join("\n"), "decision-engine");
+   282→   282→    projectMemory.write("decision", "Stack Selection", decisions.map((d) => `${d.topic}: ${d.chosen} (${d.confidence})`).join("\n"), "decision-engine");
+   283→   283→    projectMemory.write("architecture", "Capabilities", capabilities.join(", ") || "none", "decision-engine");
+   284→   284→
+   285→   285→    // ---- Phase A2: Read Architecture + Decision Memory back into a context ----
+   286→   286→    // The orchestrator just wrote to Architecture + Decision Memory above. We
+   287→   287→    // read those records back and concatenate them into a single memoryContext
+   288→   288→    // string that is passed to every generator so the generated project
+   289→   289→    // carries the engine's decision history in its README.
+   290→   290→    const archMemory = projectMemory.read("architecture");
+   291→   291→    const decisionMemory = projectMemory.read("decision");
+   292→   292→    const memoryContext =
+   293→   293→      [
+   294→   294→        "=== ARCHITECTURE MEMORY ===",
+   295→   295→        ...archMemory.map((r) => `[${r.title}] (v${r.version}, source: ${r.source})\n${r.content}`),
+   296→   296→        "",
+   297→   297→        "=== DECISION MEMORY ===",
+   298→   298→        ...decisionMemory.map((r) => `[${r.title}] (v${r.version}, source: ${r.source})\n${r.content}`),
+   299→   299→      ].join("\n");
+   300→   300→
+   301→   301→    // Workflow selection
+   302→   302→    const workflow = workflowEngine.select(prompt);
+   303→   303→    observability.recordEvent({
+   304→   304→      id: `ev-${Date.now()}-wf`,
+   305→   305→      ts: Date.now(),
+   306→   306→      type: "workflow-selected",
+   307→   307→      workflowId: workflow.id,
+   308→   308→      message: `Selected workflow: ${workflow.name}`,
+   309→   309→      level: "info",
+   310→   310→    });
+   311→   311→
+   312→   312→    // ---- Real generation: invoke the generator for each detected target ----
+   313→   313→    // The Desktop Generator (Anvil) produces WinUI 3 / Tauri scaffolding; the
+   314→   314→    // Android Generator (Droid) produces Kotlin+Compose / Flutter; the Web
+   315→   315→    // Generator (Forge) produces a REAL compilable Next.js app (Prisma + auth
+   316→   316→    // + CRUD pages derived from the requirement's data model). Files are
+   317→   317→    // versioned into the Artifact Registry and emitted as artifact-produced
+   318→   318→    // events for observability.
+   319→   319→    //
+   320→   320→    // Phase A1 + A2: pass the per-target skillContent (from SKILL.md) and
+   321→   321→    // the memoryContext (Architecture + Decision memory) into each generator
+   322→   322→    // so they flow through the pipeline into the generated README.
+   323→   323→    const generationResults = targets.map((t, i) => {
+   324→   324→      const result = generateForTarget(t.kind, t.stack, promptToName(prompt) || `App${i + 1}`, `t${i + 1}`, {
+   325→   325→        prompt,
+   326→   326→        capabilities,
+   327→   327→        nonFunctionals: detectNonFunctionals(prompt),
+   328→   328→        skillContent: skillContentMap[t.kind],
+   329→   329→        memoryContext,
+   330→   330→      });
+   331→   331→      observability.recordEvent({
+   332→   332→        id: `ev-${Date.now()}-gen-${i}`,
+   333→   333→        ts: Date.now(),
+   334→   334→        type: "artifact-produced",
+   335→   335→        stageId: "generate",
+   336→   336→        message: `${t.label}: generated ${result.files.length} files (${result.stack})${skillContentMap[t.kind] ? " + skill content embedded" : ""}${memoryContext ? " + memory context embedded" : ""}`,
+   337→   337→        level: "success",
+   338→   338→      });
+   339→   339→      projectMemory.write(
+   340→   340→        "code",
+   341→   341→        `${t.label} source`,
+   342→   342→        result.files.map((f) => `${f.path} (${(f.content.length / 1024).toFixed(1)} KB)`).join("\n"),
+   343→   343→        result.producedBy
+   344→   344→      );
+   345→   345→      return result;
+   346→   346→    });
+   347→   347→    let totalFiles = generationResults.reduce((n, g) => n + g.files.length, 0);
+   348→   348→    const wsProjectId = projectId ?? `proj-${Date.now()}`;
+   349→   349→
+   350→   350→    // ---- Tier 1 Skills: generate tests, CI/CD, Docker ----
+   351→   351→    // These are REAL skills — each produces compilable/validatable files.
+   352→   352→    const tier1Ctx = { projectName: promptToName(prompt) || "App", prompt, capabilities, nonFunctionals: detectNonFunctionals(prompt) };
+   353→   353→    const tier1Files: { folder: string; files: import("./generators").VirtualFile[] }[] = [];
+   354→   354→
+   355→   355→    // 1. Test generation — web (Vitest), desktop (xUnit), android (JUnit)
+   356→   356→    for (const t of targets) {
+   357→   357→      if (t.kind === "web") tier1Files.push({ folder: "web-admin", files: generateWebTests(tier1Ctx) });
+   358→   358→      if (t.kind === "windows") tier1Files.push({ folder: "desktop", files: generateDesktopTests(tier1Ctx) });
+   359→   359→      if (t.kind === "android") tier1Files.push({ folder: "android", files: generateAndroidTests(tier1Ctx) });
+   360→   360→    }
+   361→   361→
+   362→   362→    // 2. CI/CD generation — .github/workflows/build.yml
+   363→   363→    const cicdFiles = generateCICD(promptToName(prompt) || "App", targets.map((t) => ({ kind: t.kind, label: t.label, role: t.role, stack: t.stack, id: "" })));
+   364→   364→    tier1Files.push({ folder: "", files: cicdFiles });
+   365→   365→
+   366→   366→    // 3. Docker generation — Dockerfile per target + docker-compose.yml
+   367→   367→    const dockerFiles = generateDocker(promptToName(prompt) || "App", targets.map((t) => ({ kind: t.kind, label: t.label, role: t.role, stack: t.stack, id: "" })));
+   368→   368→    tier1Files.push({ folder: "", files: dockerFiles });
+   369→   369→
+   370→   370→    // Materialize Tier 1 files to workspace
+   371→   371→    for (const { folder, files } of tier1Files) {
+   372→   372→      if (files.length === 0) continue;
+   373→   373→      try {
+   374→   374→        await fetch("/api/workspace", {
+   375→   375→          method: "POST",
+   376→   376→          headers: { "Content-Type": "application/json" },
+   377→   377→          body: JSON.stringify({ projectId: wsProjectId, targetFolder: folder || "root", files }),
+   378→   378→        });
+   379→   379→      } catch { /* best effort */ }
+   380→   380→      totalFiles += files.length;
+   381→   381→    }
+   382→   382→    observability.recordEvent({
+   383→   383→      id: `ev-${Date.now()}-tier1`,
+   384→   384→      ts: Date.now(),
+   385→   385→      type: "artifact-produced",
+   386→   386→      stageId: "generate",
+   387→   387→      message: `Tier 1: generated ${tier1Files.reduce((n, f) => n + f.files.length, 0)} test/cicd/docker files`,
+   388→   388→      level: "success",
+   389→   389→    });
+   390→   390→
+   391→   391→    // Compile DAG
+   392→   392→    const tasks = workflowEngine.compile(workflow, workflow.stages.map((s) => s.id as StageId));
+   393→   393→
+   394→   394→    // Materialize generated files to a real on-disk workspace so the
+   395→   395→    // compilation gate can run `tsc --noEmit` against them.
+   396→   396→    const workspacePaths: Record<string, string> = {}; // targetId -> path
+   397→   397→    for (let i = 0; i < targets.length; i++) {
+   398→   398→      const t = targets[i];
+   399→   399→      const gen = generationResults[i];
+   400→   400→      const folder = t.kind === "windows" ? "desktop" : t.kind === "android" ? "android" : t.kind === "web" ? "web-admin" : t.kind === "cli" ? "cli" : "app";
+   401→   401→      try {
+   402→   402→        const res = await fetch("/api/workspace", {
+   403→   403→          method: "POST",
+   404→   404→          headers: { "Content-Type": "application/json" },
+   405→   405→          body: JSON.stringify({ projectId: wsProjectId, targetFolder: folder, files: gen.files }),
+   406→   406→        });
+   407→   407→        if (res.ok) {
+   408→   408→          const { path: wsPath } = await res.json();
+   409→   409→          workspacePaths[`t${i + 1}`] = wsPath;
+   410→   410→          observability.recordEvent({
+   411→   411→            id: `ev-${Date.now()}-ws-${i}`,
+   412→   412→            ts: Date.now(),
+   413→   413→            type: "artifact-produced",
+   414→   414→            stageId: "generate",
+   415→   415→            message: `${t.label}: materialized ${gen.files.length} files to ${wsPath}`,
+   416→   416→            level: "info",
+   417→   417→          });
+   418→   418→        }
+   419→   419→      } catch {
+   420→   420→        // workspace write is best-effort; gates will skip if no workspace
+   421→   421→      }
+   422→   422→    }
+   423→   423→    // Annotate the compilation gate task with the web workspace (runs tsc).
+   424→   424→    // For multi-target builds, attach the primary target's workspace + type.
+   425→   425→    // Desktop/android static validation happens via their own gate tasks below.
+   426→   426→    const webWorkspace = workspacePaths["t1"] ?? Object.values(workspacePaths)[0] ?? undefined;
+   427→   427→    const primaryTarget = targets[0];
+   428→   428→    const primaryType = primaryTarget?.kind === "windows" ? "desktop" : primaryTarget?.kind === "android" ? "android" : "web";
+   429→   429→    for (const task of tasks) {
+   430→   430→      // Set gateContext for ALL gate tasks. Structural gates (architecture,
+   431→   431→      // security, etc.) need artifactCount to pass. Compilation gates need
+   432→   432→      // workspacePath + targetType.
+   433→   433→      if (task.gate) {
+   434→   434→        (task as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext = {
+   435→   435→          workspacePath: webWorkspace,
+   436→   436→          artifactCount: totalFiles,
+   437→   437→          targetType: task.gate === "compilation" ? primaryType : undefined,
+   438→   438→        };
+   439→   439→      }
+   440→   440→      // Attach toolId + cwd to the build stage task so it runs npm-build (web only)
+   441→   441→      if (task.stageId === "build" && !task.gate && webWorkspace && primaryTarget?.kind === "web") {
+   442→   442→        task.toolId = "npm-build";
+   443→   443→        (task as Task & { args?: { cwd?: string } }).args = { cwd: webWorkspace };
+   444→   444→      }
+   445→   445→    }
+   446→   446→
+   447→   447→    // For multi-target builds, add per-target compilation gate tasks for
+   448→   448→    // desktop/android so their static validators run too.
+   449→   449→    for (let i = 0; i < targets.length; i++) {
+   450→   450→      const t = targets[i];
+   451→   451→      const wsPath = workspacePaths[`t${i + 1}`];
+   452→   452→      if (!wsPath) continue;
+   453→   453→      const tType = t.kind === "windows" ? "desktop" : t.kind === "android" ? "android" : null;
+   454→   454→      if (!tType || tType === primaryType) continue; // skip, already covered
+   455→   455→      const extraGate = makeTask({
+   456→   456→        workflowId: workflow.id,
+   457→   457→        stageId: "build",
+   458→   458→        title: `Gate: compilation (${tType})`,
+   459→   459→        description: `Static validation for ${t.label}`,
+   460→   460→        agent: "orchestrator" as AgentRole,
+   461→   461→        dependsOn: [],
+   462→   462→        gate: "compilation" as GateId,
+   463→   463→      });
+   464→   464→      (extraGate as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext = {
+   465→   465→        workspacePath: wsPath,
+   466→   466→        artifactCount: totalFiles,
+   467→   467→        targetType: tType as "desktop" | "android",
+   468→   468→      };
+   469→   469→      tasks.push(extraGate);
+   470→   470→    }
+   471→   471→
+   472→   472→    // Token budget check
+   473→   473→    if (!tokenBudgetManager.withinBudget("planner", workflow.id)) {
+   474→   474→      observability.recordEvent({
+   475→   475→        id: `ev-${Date.now()}-budget`,
+   476→   476→        ts: Date.now(),
+   477→   477→        type: "task-failed",
+   478→   478→        message: "Token budget exhausted for planner",
+   479→   479→        level: "error",
+   480→   480→      });
+   481→   481→    }
+   482→   482→    // Token charging: real tokens come from the z-ai SDK chat response
+   483→   483→    // (captured in use-chat.ts via usage.total_tokens). For non-LLM tasks
+   484→   484→    // (planner context, generator file production), tokens = 0 — no estimate.
+   485→   485→    // The ctx.tokenEstimate is NOT charged — it was only used for budget
+   486→   486→    // checking, not for observability metrics.
+   487→   487→    tokenBudgetManager.charge("planner", workflow.id, 0);
+   488→   488→    // Generator agents produce files via deterministic templates, not LLM
+   489→   489→    // calls — no tokens consumed. Real tokens are only from /api/chat.
+   490→   490→    for (const g of generationResults) {
+   491→   491→      observability.chargeTokens(g.producedBy, 0, workflow.id);
+   492→   492→      tokenBudgetManager.charge(g.producedBy, workflow.id, 0);
+   493→   493→    }
+   494→   494→
+   495→   495→    // Submit to execution engine (parallel, dependency-scheduled). If the
+   496→   496→    // ambiguity gate raised a question, askQuestionIfNeeded already cancelled
+   497→   497→    // running tasks; we still return the plan so the UI can surface the question.
+   498→   498→    executionEngine.submitAll(tasks);
+   499→   499→    if (pendingQuestion) {
+   500→   500→      // Pause: cancel anything that just started so the engine waits for the
+   501→   501→      // user's clarification before resuming.
+   502→   502→      executionEngine.cancelAll();
+   503→   503→      projectMemory.write("requirements", "Pending Question", pendingQuestion, "ambiguity-detector");
+   504→   504→    }
+   505→   505→
+   506→   506→    return {
+   507→   507→      workflow,
+   508→   508→      targets,
+   509→   509→      decisions,
+   510→   510→      capabilities,
+   511→   511→      tasks,
+   512→   512→      generatedFiles: totalFiles,
+   513→   513→      ambiguityScore: ambiguity.score,
+   514→   514→      pendingQuestion,
+   515→   515→    };
+   516→   516→  }
+   517→   517→
+   518→   518→  /** Checkpoint after a stage completes (for recovery). */
+   519→   519→  checkpoint(stageId: StageId, workflowId: WorkflowId, snapshot: Record<string, import("./types").TaskStatus>): void {
+   520→   520→    const cp = checkpointManager.save(stageId, workflowId, snapshot, projectMemory.version());
+   521→   521→    observability.recordEvent({
+   522→   522→      id: `ev-${Date.now()}-cp`,
+   523→   523→      ts: Date.now(),
+   524→   524→      type: "checkpoint-saved",
+   525→   525→      stageId,
+   526→   526→      message: `Checkpoint saved at ${stageId}`,
+   527→   527→      level: "debug",
+   528→   528→    });
+   529→   529→    void cp;
+   530→   530→  }
+   531→   531→
+   532→   532→  /** Resume from the last checkpoint after a crash. */
+   533→   533→  resume(): { stageId: string; snapshot: Record<string, import("./types").TaskStatus> } | null {
+   534→   534→    const r = checkpointManager.resume();
+   535→   535→    if (r) {
+   536→   536→      observability.recordEvent({
+   537→   537→        id: `ev-${Date.now()}-cr`,
+   538→   538→        ts: Date.now(),
+   539→   539→        type: "checkpoint-restored",
+   540→   540→        message: `Resumed from checkpoint at ${r.stageId}`,
+   541→   541→        level: "info",
+   542→   542→      });
+   543→   543→    }
+   544→   544→    return r;
+   545→   545→  }
+   546→   546→
+   547→   547→  /** Subscribe to all engine events (for UI + logs). */
+   548→   548→  subscribe(fn: (e: EngineEvent) => void): () => void {
+   549→   549→    return executionEngine.subscribe(fn);
+   550→   550→  }
+   551→   551→
+   552→   552→  selfHeal() {
+   553→   553→    return selfHealController;
+   554→   554→  }
+   555→   555→}
+   556→   556→
+   557→   557→export const orchestrator = new Orchestrator();
+   558→   558→
+   559→   559→/** Derive a clean project name from the prompt (shared with the store). */
+   560→   560→function promptToName(prompt: string): string {
+   561→   561→  let trimmed = prompt.trim().toLowerCase();
+   562→   562→  let prev = "";
+   563→   563→  while (prev !== trimmed) {
+   564→   564→    prev = trimmed;
+   565→   565→    trimmed = trimmed.replace(
+   566→   566→      /^(build|build me|create|make|generate|develop|i want|i need|please|a|an|the|me|some)\s+/i,
+   567→   567→      ""
+   568→   568→    );
+   569→   569→  }
+   570→   570→  const stopwords = new Set([
+   571→   571→    "in", "that", "with", "for", "to", "and", "of", "on", "using", "via",
+   572→   572→    "which", "from", "into", "where", "when", "app", "application", "as",
+   573→   573→    "companion", "portal", "admin", "me",
+   574→   574→  ]);
+   575→   575→  const acronyms = new Set(["cli", "ai", "api", "sdk", "saas", "ui", "ux", "ios", "ml", "crm", "cms", "erp", "hrm"]);
+   576→   576→  const words: string[] = [];
+   577→   577→  for (const w of trimmed.split(/\s+/).filter(Boolean)) {
+   578→   578→    if (stopwords.has(w)) break;
+   579→   579→    words.push(w);
+   580→   580→    if (words.length >= 3) break;
+   581→   581→  }
+   582→   582→  if (words.length === 0) return "App";
+   583→   583→  return words
+   584→   584→    .map((w) => (acronyms.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+   585→   585→    .join(" ")
+   586→   586→    .replace(/[^a-zA-Z0-9 ]/g, "")
+   587→   587→    .trim();
+   588→   588→}
+   589→   589→
