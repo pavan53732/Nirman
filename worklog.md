@@ -824,3 +824,203 @@ Verification Artifacts:
 - /api/debug/perf-profile: fileDefinition field added, ?scenario=N supported
 - /api/build/trace: 18 tasks, 17 batches
 - /api/agents/trace: 8 agents, timeline captured
+
+---
+Task ID: J
+Agent: Task-J (dynamic-subagents)
+Task: Implement DynamicAgentRegistry — capability-based spawn/destroy lifecycle for specialist sub-agents
+
+Work Log:
+- Read agent-contracts.ts (DynamicAgent, SubAgentSpec, AgentHandler, AgentExecutionResult, AgentExecutionContext interfaces), types.ts (Capability, AgentRole, TaskStatus), data/agents.ts (static registry — 8 always-active agents, plus 20 dynamic layer-6 agent slots that this registry materializes on demand), and decision-engine.ts (detectCapabilities() returns the Capability[] that drives planDynamicSpawns()).
+- Created src/lib/engine/dynamic-agents.ts:
+  * `DynamicAgentRegistry` class with spawn / destroy / get / list / listActive / executeAndDestroy / getSummary / clear methods.
+  * `spawn(role, spec, handler)` assigns id `dynamic-<n>-<role>`, sets spawnedAt + status="active".
+  * `executeAndDestroy(id, buildCtx)` runs the handler with a try/finally that ALWAYS calls destroy — no agent ever leaks past execution. Surfaces the agent's `objective` onto the ctx (since AgentExecutionContext doesn't carry it natively) so the specialist handler can read it.
+  * `destroy(id)` sets destroyedAt, flips status to "completed" (or preserves "failed" set by executeAndDestroy), and bumps destroyCount. Records are RETAINED for lineage auditing (clear() purges everything for a fresh build).
+  * `planDynamicSpawns(capabilities)` — pure function, maps Capability → specialist role via CAPABILITY_TO_SPECIALIST (dedupes by role).
+  * `makeSpecialistHandler(role)` — emits a structured recommendation report + memoryWrites (kind=architecture) + sharedWrites (key=`specialist:<role>`).
+  * SPECIALIST_LABELS map: authentication→Sentinel, payments→Mint, realtime→Pulse, offline-sync→Sync, security→Aegis, document→Quill, notifications→Herald, gpu→Render.
+  * Exported singleton `dynamicAgentRegistry` (mirrors pattern of other engine modules).
+- Created src/app/api/debug/dynamic-agents/route.ts:
+  * GET returns dynamicAgentRegistry.getSummary().
+  * POST accepts `{ capabilities: Capability[], prompt?: string }`, plans spawns, executes each specialist synchronously with a minimal fully-typed AgentExecutionContext (in-memory SharedContext, empty memory/skills, no-op spawnSubAgent/emit), destroys each, and returns { spawnedRoles, results, summary }.
+  * Fixed TaskStatus: used "queued" (not "pending" — "pending" is a StageStatus, not a TaskStatus).
+- Modified src/lib/engine/index.ts (ADDITIVE only — Task L's `AgentContextBundle` export and Task I's `AgentActivation` export were already present and untouched):
+  * Exported DynamicAgentRegistry, dynamicAgentRegistry, planDynamicSpawns, makeSpecialistHandler, CAPABILITY_TO_SPECIALIST.
+  * Re-exported types DynamicAgent and SubAgentSpec from agent-contracts.
+- Verified no file-ownership violations: did NOT touch agent-runtime.ts, agent-handlers.ts, orchestrator.ts, generators/*, memories.ts, or skills/* (Task I/L/K/M territory).
+
+Stage Summary:
+- Files created: src/lib/engine/dynamic-agents.ts, src/app/api/debug/dynamic-agents/route.ts
+- Files modified: src/lib/engine/index.ts (additive exports only)
+- tsc errors: 0 (`npx tsc --noEmit 2>&1 | grep "error TS" | grep "src/" | grep -v "skills/" | grep -v "examples/" | wc -l` → 0)
+- lint: clean (`bun run lint` exits 0)
+- POST /api/debug/dynamic-agents result (capabilities=["auth","payments"]):
+    spawnedRoles: ["authentication-specialist","payments-specialist"]
+    results: both status="success" with memoryWrites (kind=architecture) + sharedWrites (specialist:<role>)
+    summary: { totalSpawned: 2, totalDestroyed: 2, currentlyActive: 0 }
+    Both agents have label="Sentinel"/"Mint", parent="orchestrator", status="completed", non-null destroyedAt.
+- Spawn triggers (Capability → specialist role):
+    "auth"          → "authentication-specialist" (Sentinel)
+    "payments"      → "payments-specialist" (Mint)
+    "realtime"      → "realtime-specialist" (Pulse)
+    "offline-sync"  → "offline-sync-specialist" (Sync)
+    "encryption"    → "security-specialist" (Aegis)
+    "pdf"           → "document-specialist" (Quill)
+    "notifications" → "notifications-specialist" (Herald)
+    "gpu"           → "gpu-specialist" (Render)
+
+---
+Task ID: L
+Agent: Task-L (memory-readback)
+Task: Wire ContextBuilder so every agent receives a relevant memory slice + debug endpoint proving readback
+
+Work Log:
+- Read worklog.md, agent-contracts.ts (AgentExecutionContext.memory field), memories.ts (ProjectMemoryManager + ContextBuilder), types.ts (MemoryKind, MemoryRecord), orchestrator.ts (only planner at line ~174 calls contextBuilder.buildForAgent).
+- Enhanced ContextBuilder in memories.ts:
+  * Added new exported interface `AgentContextBundle` with fields: agent, memorySlice, kinds, summary, pinCount, recordCount, prompt.
+  * Added new method `buildRichContext(agent, opts)` that returns the full AgentContextBundle (kinds pulled, human-readable summary, pinCount, recordCount).
+  * Added private `summarize(agent, kinds, slice)` helper that builds a multi-line debug summary (agent, kinds, record/pinned counts, first 5 record titles).
+  * Refactored legacy `buildForAgent()` to delegate to `buildRichContext()` and return just `{ memorySlice, tokenEstimate: 0 }` — fully backward compatible, no signature change.
+  * `defaultKindsFor()` kept as-is per spec (existing branch ordering preserved).
+- Created /api/debug/memory-readback/route.ts (GET):
+  * Writes 11 test records across 5 memory kinds (requirements x2, decision x1, architecture x3, code x3, build x2) — same kinds the orchestrator writes during a real build.
+  * Calls `contextBuilder.buildRichContext()` for each of 8 canonical agent roles: requirements-analyst, planner, solution-architect, frontend-generator, build-engineer, test-generator, packaging-engineer, code-reviewer.
+  * Returns per-agent bundle (kinds, recordCount, pinCount, titles, summary) + a kind->agent coverage matrix + roll-up summary (totalAgents, agentsWithMemory, totalRecordsRead, readbackWorks).
+  * Imports through `@/lib/engine` index (triggers orchestrator.bootstrap() AFTER orchestrator.ts evaluates — avoids the TDZ circular-dep crash other debug endpoints hit).
+- Updated src/lib/engine/index.ts:
+  * Added `MEMORY_KINDS` to the named exports from "./memories".
+  * Added `export type { AgentContextBundle } from "./memories"` (re-export as type — no unused import).
+- Verified:
+  * tsc --noEmit on MY files: 0 errors. (1 pre-existing error in src/app/api/debug/dynamic-agents/route.ts:86 — NOT my file, owned by parallel Task I; `"pending"` not assignable to TaskStatus. I did not touch it per strict file ownership.)
+  * bun run lint: clean (no warnings, no errors).
+  * curl http://localhost:3000/api/debug/memory-readback: HTTP 200, readbackWorks=true, all 8 agents have recordCount > 0.
+
+Stage Summary:
+- Files modified: src/lib/engine/memories.ts (added AgentContextBundle interface + buildRichContext method + summarize helper; refactored buildForAgent to delegate)
+- Files modified: src/lib/engine/index.ts (added MEMORY_KINDS export + AgentContextBundle type re-export)
+- Files created: src/app/api/debug/memory-readback/route.ts (GET endpoint proving memory readback works for every agent)
+- tsc errors (my files): 0
+- tsc errors (other task's file dynamic-agents/route.ts:86): 1 — pre-existing, not mine, will be fixed by Task I
+- lint: clean
+- /api/debug/memory-readback result:
+    summary: { totalAgents: 8, agentsWithMemory: 8, agentsWithoutMemory: 0, totalRecordsRead: 42, avgRecordsPerAgent: 5.25, readbackWorks: true }
+- Memory kind -> agent mapping (verified by kindAgentMatrix in the response):
+    requirements    -> requirements-analyst, planner, solution-architect
+    architecture    -> solution-architect, frontend-generator, test-generator
+    decision        -> requirements-analyst, planner, solution-architect, frontend-generator, test-generator, code-reviewer
+    code            -> frontend-generator, build-engineer, test-generator, packaging-engineer, code-reviewer
+    build           -> build-engineer, packaging-engineer, code-reviewer
+    artifact        -> build-engineer, packaging-engineer
+    conversation    -> requirements-analyst, planner
+- Per-agent record counts (proving non-empty slices for every agent):
+    requirements-analyst: 3 records  (requirements + decision)
+    planner:              3 records  (requirements + decision)
+    solution-architect:   6 records  (architecture + decision + requirements)
+    frontend-generator:   7 records  (code + architecture + decision)
+    build-engineer:       5 records  (build + code; artifact kind requested but no artifact records written in test)
+    test-generator:       7 records  (code + architecture + decision — matches "generator" branch in defaultKindsFor before "test" branch; pre-existing behavior, kept as-is per spec)
+    packaging-engineer:   5 records  (build + code; artifact kind requested but no artifact records written in test)
+    code-reviewer:        6 records  (code + build + decision)
+- Next actions for downstream tasks:
+  * Task I (agent-runtime): replace `contextBuilder.buildForAgent(agent)` calls with `contextBuilder.buildRichContext(agent)` so every agent execution receives the full AgentContextBundle — then surface `bundle.summary` in the trace/log UI and pass `bundle.memorySlice` into AgentExecutionContext.memory.
+  * Task M (orchestrator): the single `contextBuilder.buildForAgent("planner", ...)` call at orchestrator.ts:174 can stay (backward compatible) or upgrade to buildRichContext for the richer summary in observability events.
+
+---
+Task ID: I
+Agent: Task-I (agent-runtime-executor)
+Task: Implement SharedContext blackboard + refactor AgentRuntime from tracer to execution gateway + agent handler registry
+
+Work Log:
+- Read worklog.md, agent-contracts.ts (the shared interface contract), agent-runtime.ts (existing 263-line tracer), execution-engine.ts, generators.ts (generateForTarget signature), types.ts (AgentRole, Capability, PlatformKind, Task, MemoryKind), memories.ts (projectMemory + contextBuilder).
+- Verified baseline: pre-existing tsc errors in src/app/api/debug/{dynamic-agents,memory-readback}/route.ts were owned by Tasks J/L (NOT my files); they cleared as Tasks J/L landed their changes in parallel. Final state: 0 src errors.
+- Created src/lib/engine/shared-context.ts (~95 lines) — SharedContextImpl class backed by Map<string, unknown> with read/write/has/readAll/clear + size accessor. Process-wide singleton `sharedContext`. JSDoc explains the blackboard pattern, the key naming convention (plan, requirements, architecture, code:<target>, review:<target>, tests:<target>, build:<target>, package:<target>), and why a Map (insertion order, no prototype pollution, O(1) lookups).
+- Created src/lib/engine/agent-handlers.ts (~310 lines) — registry mapping AgentRole string → AgentHandler. 10 handlers across all 4 active layers:
+  * Layer 1: orchestrator (gate), planner (writes "plan")
+  * Layer 2: requirements-analyst (writes "requirements"), solution-architect (reads "plan", writes "architecture")
+  * Layer 3: frontend-generator, desktop-generator, android-generator — each wraps generateForTarget() and writes "code:<target>"
+  * Layer 4: build-engineer (reads "code:<target>", writes "build:<target>"), test-generator (writes "tests:<target>"), packaging-engineer (reads "build:<target>" + "tests:<target>", writes "package:<target>")
+  Exports: agentHandlers (Partial<Record<string, AgentHandler>>), getAgentHandler(role), AGENT_HANDLER_COUNT.
+- Modified src/lib/engine/agent-runtime.ts — added 3 new methods to the existing AgentRuntime class WITHOUT removing any tracer functionality:
+  * executeTask(task, prompt, capabilities) → AgentExecutionResult — the SINGLE ENTRY POINT for executing agent work. Looks up handler by task.agent via getAgentHandler; builds AgentExecutionContext (memory slice from contextBuilder.buildForAgent, empty skills[] for now until Task K's skill-injector lands, shared: sharedContext, platform via inferPlatform, spawnSubAgent closure, no-op emit); invokes handler; persists result.memoryWrites to projectMemory (with task.agent as source); persists result.sharedWrites to sharedContext; returns result with durationMs filled in. Returns structured failure on missing handler or thrown error.
+  * inferPlatform(task) — infers PlatformKind from task.title + task.stageId via regex (windows/desktop/winui/wpf/tauri → "windows"; android/kotlin/compose/flutter → "android"; web/next/react/frontend → "web"; cli/rust-cli → "cli"). Returns undefined when no signal — handlers fall back to "web".
+  * spawnSubAgent(role, spec, ...) — placeholder that returns structured-success. Interface is correct so handlers can call ctx.spawnSubAgent without breaking; Task J will swap the implementation to dispatch through DynamicAgentRegistry.
+  Added imports for Capability, PlatformKind (from types), AgentExecutionContext/AgentExecutionResult/AgentHandler/SkillContent/SubAgentSpec (from agent-contracts), getAgentHandler (from agent-handlers), sharedContext (from shared-context), contextBuilder/projectMemory (from memories). Kept ALL existing tracer code: AGENT_LABELS, AGENT_LAYERS, AgentActivation interface, attach/detach/isAttached/handleEvent/getActivations/getActivation/getSummary/clear methods, singleton agentRuntime, initAgentRuntime auto-attach.
+- Modified src/lib/engine/index.ts — added 3 new export blocks AFTER the existing Task J exports (additive, no conflicts):
+  * `export { SharedContextImpl, sharedContext } from "./shared-context"`
+  * `export { agentHandlers, getAgentHandler, AGENT_HANDLER_COUNT } from "./agent-handlers"`
+  * `export type { SharedContext, AgentHandler, AgentExecutionContext, AgentExecutionResult, SkillContent } from "./agent-contracts"` (DynamicAgent + SubAgentSpec already exported by Task J — NOT re-exported to avoid duplicate identifier)
+- Smoke test (run via bun): SharedContext basic ops (write/read/has/readAll/clear/size), singleton, handler registry, executeTask(planner) — wrote "plan" to sharedContext, executeTask(frontend-generator) — called real generateForTarget and produced 24 files + wrote "code:web", executeTask(unknown-agent) — returned structured failure with "No handler registered" error. All assertions passed.
+
+Stage Summary:
+- Files created: src/lib/engine/shared-context.ts, src/lib/engine/agent-handlers.ts
+- Files modified: src/lib/engine/agent-runtime.ts (added executor gateway to existing tracer), src/lib/engine/index.ts (added 3 export blocks)
+- tsc errors: 0 in src/ (excluding skills/ and examples/ which have 4 unrelated errors about socket.io-client, socket.io, CreateImageEditBody, and stock-analysis-skill — all pre-existing)
+- lint: clean (exit 0)
+- Handler count: 10 agents registered (orchestrator, planner, requirements-analyst, solution-architect, frontend-generator, desktop-generator, android-generator, build-engineer, test-generator, packaging-engineer)
+- Key design: AgentRuntime.executeTask() is the SINGLE ENTRY POINT for executing agent work. The orchestrator submits a Task to the ExecutionEngine; the ExecutionEngine calls executeTask(); executeTask() looks up the handler by task.agent, builds an AgentExecutionContext (memory slice + shared context + spawnSubAgent + emit), invokes the handler, then commits the handler's declared memoryWrites to projectMemory and sharedWrites to the SharedContext blackboard. Agents communicate ONLY via the SharedContext blackboard using well-known keys (plan, architecture, code:<target>, build:<target>, tests:<target>, package:<target>) — no agent calls another agent directly. This decouples agents and makes the data-flow statically auditable. The existing tracer (attach/handleEvent/getActivations) is PRESERVED and COMPLEMENTARY — it proves agents activate; the executor proves they produce outputs. Skills injection (ctx.skills = [] placeholder) will be wired by Task K's skill-injector. Sub-agent spawning (ctx.spawnSubAgent placeholder) will be wired by Task J's DynamicAgentRegistry.
+
+---
+Task ID: K
+Agent: Task-K (skill-injector)
+Task: Implement SkillInjector — reads SKILL.md files relevant to each agent role and injects into agent context
+
+Work Log:
+- Read worklog (Tasks A–J + Final/Final-2 already landed), agent-contracts.ts (SkillContent interface: { id, title, category, content, relevantTo }), skills/loader.ts (server-side SkillDef reader, getSkill(name) matches by folder name OR SKILL.md frontmatter `name`), skills/registry.ts (SKILLS = { web: string[], windows: string[], android: string[] } — NOT a Record<string, SkillDef>, so the task spec's `SKILLS[skillId]` example had to be adapted), data/agents.ts (8 injectable agent roles confirmed), data/skills.ts (stageAgentMap + 100+ skill entries), types.ts (Capability union of 16 values; PlatformKind of 13 values).
+- Confirmed the engine's index.ts is imported by CLIENT components (chat-panel.tsx, status-panel.tsx, capabilities-dialog.tsx, logs-dialog.tsx, use-orchestration.ts all have "use client" and import from "@/lib/engine"). Therefore skill-injector.ts MUST be browser-safe — statically importing skills/loader.ts (which uses Node `fs`) would break the client bundle. Solution: skill-injector.ts statically imports ONLY skills/registry.ts (pure data) + agent-contracts.ts (types) + types.ts (types). Real SKILL.md loading is delegated to a separate async helper (enrichSkillsWithLoaderContent) that uses dynamic `import("./skills/loader")` guarded by `typeof window !== "undefined"`.
+- Created /src/lib/engine/skill-injector.ts:
+  - AGENT_SKILL_MAP: 8 agent roles → list of registry skill IDs (planner, solution-architect, frontend-generator, build-engineer, test-generator, packaging-engineer, code-reviewer, orchestrator=[]).
+  - CAPABILITY_SKILL_MAP: { auth: ["next-auth"], "offline-sync": ["efcore-sqlite-conditional", "room-conditional"] }.
+  - SKILL_ID_TO_FOLDER: { "next-auth": "auth" } — maps the registry skill ID to the real /skills/<folder>/SKILL.md on disk (auth is the only registry skill ID with a corresponding SKILL.md folder today; extensible).
+  - injectSkills(agent, opts): sync, browser-safe. Filters frontend-generator skills by platform (intersects with SKILLS.web/windows/android arrays — NOT regex, to avoid "lazycolumn-crud" leaking through the web filter via the "crud" substring). Adds capability skills to ALL injectable agents. Returns SkillContent[].
+  - loadSkillContent(skillId, agentRole): returns SkillContent with synthesized markdown body (ID, platform, SKILL.md folder pointer, explanation). Never throws; returns null for unknown skill IDs (filtered out).
+  - enrichSkillsWithLoaderContent(skills): async, server-only. Uses dynamic import of skills/loader.ts and SKILL_ID_TO_FOLDER to replace synthesized content with real SKILL.md markdown when available.
+  - getInjectionPlan(opts): returns { [agent]: { skillIds, count } } for the 7 injectable agents.
+  - getAgentSkillMap / getCapabilitySkillMap / getSkillFolder: read-only accessors for the maps (used by the debug endpoint to explain WHY a skill was injected).
+- Created /src/app/api/debug/skill-injection/route.ts: GET endpoint with optional ?platform=web&capabilities=auth,payments. Validates platform against the 13 PlatformKind values and capabilities against the 16 Capability values. Returns { platform, capabilities, injectionPlan, sample (frontend-generator with full SkillContent body + contentSource: "real-skills-md" | "synthesized"), maps: { agentSkillMap, capabilitySkillMap } }. Uses enrichSkillsWithLoaderContent to demonstrate real SKILL.md loading.
+- Modified /src/lib/engine/index.ts: ADDED 6 exports (injectSkills, getInjectionPlan, enrichSkillsWithLoaderContent, getAgentSkillMap, getCapabilitySkillMap, getSkillFolder) at the END of the file (after Task I's agent-contracts export block). Did NOT modify or move any Task I / Task J / Task L exports.
+- Initial filterByPlatform used regex matching (/crud/i) which let "lazycolumn-crud" leak through the web filter. Fixed by intersecting with SKILLS.web/windows/android arrays from the registry — exact ID matching, no substring false positives.
+- Verified tsc --noEmit: 0 errors in src/ (4 pre-existing errors remain in examples/websocket/ and skills/image-edit + skills/stock-analysis-skill, all excluded by the task's filter).
+- Verified bun run lint: clean (exit 0).
+- Verified live endpoint on running dev server:
+  - GET /api/debug/skill-injection?platform=web&capabilities=auth → HTTP 200
+  - frontend-generator (web): [nextjs-app-router, react-server-components, tailwind, crud-table, api-routes, next-auth] (6 skills) — web skills only, no android/windows leaks
+  - auth capability injected next-auth into ALL 7 injectable agents (planner, solution-architect, frontend-generator, build-engineer, test-generator, packaging-engineer, code-reviewer)
+  - next-auth sample has contentSource="real-skills-md", contentLength=2278 (loaded /skills/auth/SKILL.md); other samples have contentSource="synthesized"
+  - GET /api/debug/skill-injection?platform=windows&capabilities=auth,offline-sync → frontend-generator has [winui3-dotnet8, xaml-datagrid-form, observable-object-relaycommand, next-auth, efcore-sqlite-conditional, room-conditional]
+  - GET /api/debug/skill-injection?platform=android → frontend-generator has [kotlin-compose, navigation-compose, hilt-di, lazycolumn-crud, material3]
+  - Sanity-checked other endpoints still work: / (200), /api/agents/trace (200), /api/skills (200), /api/debug/failure-test (200)
+
+Stage Summary:
+- Files created: src/lib/engine/skill-injector.ts, src/app/api/debug/skill-injection/route.ts
+- Files modified: src/lib/engine/index.ts (added 6 exports at the end; no existing exports touched)
+- tsc errors: 0 (in src/, excluding pre-existing skills/ and examples/ errors)
+- lint: clean (exit 0)
+- /api/debug/skill-injection?platform=web&capabilities=auth result:
+    injectionPlan = {
+      planner:              [nextjs-app-router, prisma-sqlite, next-auth, crud-table, api-routes]                                       (5)
+      solution-architect:   [prisma-sqlite, efcore-sqlite-conditional, room-conditional, next-auth]                                    (4)
+      frontend-generator:   [nextjs-app-router, react-server-components, tailwind, crud-table, api-routes, next-auth]                  (6)  ← web-filtered
+      build-engineer:       [tsc-validation, npm-build, xml-validation, gradle-kts-validation, sln-csproj-generation, next-auth]       (6)
+      test-generator:       [tsc-validation, next-auth]                                                                                (2)
+      packaging-engineer:   [npm-build, xml-validation, gradle-kts-validation, next-auth]                                              (4)
+      code-reviewer:        [tsc-validation, xml-validation, gradle-kts-validation, next-auth]                                         (4)
+    }
+    sample.frontend-generator.skills[next-auth] = { contentSource: "real-skills-md", contentLength: 2278, title: "auth" }  ← /skills/auth/SKILL.md loaded
+- Agent → skill mapping:
+    planner              → nextjs-app-router, prisma-sqlite, next-auth, crud-table, api-routes (+ cap-based adds)
+    solution-architect   → prisma-sqlite, efcore-sqlite-conditional, room-conditional (+ cap-based adds)
+    frontend-generator   → platform-filtered (web: 5 skills, windows: 3 skills, android: 5 skills) (+ cap-based adds)
+    build-engineer       → tsc-validation, npm-build, xml-validation, gradle-kts-validation, sln-csproj-generation (+ cap-based adds)
+    test-generator       → tsc-validation (+ cap-based adds)
+    packaging-engineer   → npm-build, xml-validation, gradle-kts-validation (+ cap-based adds)
+    code-reviewer        → tsc-validation, xml-validation, gradle-kts-validation (+ cap-based adds)
+    orchestrator         → [] (gate-keeper, no skill injection)
+- Capability → skill mapping:
+    auth          → next-auth (injected into ALL 7 injectable agents)
+    offline-sync  → efcore-sqlite-conditional, room-conditional (injected into ALL 7 injectable agents)
+- Browser-safety: skill-injector.ts statically imports ONLY skills/registry.ts + agent-contracts (types) + types (types) — no `fs`, no `path`. Safe to bundle for the client (the engine index is imported by chat-panel.tsx etc.). Real SKILL.md loading is delegated to enrichSkillsWithLoaderContent(), an async server-only helper that uses dynamic import("./skills/loader") gated on `typeof window !== "undefined"`.
+- Next actions for downstream tasks:
+    - Task I (agent-runtime / agent-handlers): call injectSkills(task.agent, { platform, capabilities }) when building the AgentExecutionContext.skills field. Optionally call enrichSkillsWithLoaderContent() first if running server-side and real SKILL.md content is desired.
+    - Task M (orchestrator): pass detected capabilities + platform into the runtime so injectSkills can produce the right skill set.
+    - To extend coverage: add new entries to SKILL_ID_TO_FOLDER as new /skills/<folder>/SKILL.md files become available, and add new entries to CAPABILITY_SKILL_MAP as capability-specific skills are identified.

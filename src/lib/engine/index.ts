@@ -13,7 +13,7 @@ import { platformAdapters, previewProviders, providers } from "./data/adapters";
 import { orchestrator, readDatabaseFromMemory } from "./orchestrator";
 import { executionEngine, checkpointManager, makeTask } from "./execution-engine";
 import { workflowEngine } from "./workflow-engine";
-import { projectMemory, contextBuilder } from "./memories";
+import { projectMemory, contextBuilder, MEMORY_KINDS } from "./memories";
 import { artifactRegistry } from "./artifact-registry";
 import { decisionEngine, detectCapabilities, detectNonFunctionals } from "./decision-engine";
 import { detectTargets } from "./orchestrator";
@@ -65,6 +65,7 @@ export {
   workflowEngine,
   projectMemory,
   contextBuilder,
+  MEMORY_KINDS,
   artifactRegistry,
   decisionEngine,
   detectCapabilities,
@@ -120,4 +121,48 @@ export {
 } from "./idb";
 
 export * from "./types";
+export type { AgentContextBundle } from "./memories";
 export type { AgentActivation } from "./agent-runtime";
+
+// Dynamic sub-agent registry (Task J) — capability-based spawn/destroy
+// lifecycle for specialist agents. These exports are ADDITIVE and do not
+// modify any Task I / Task L symbols above.
+export {
+  DynamicAgentRegistry,
+  dynamicAgentRegistry,
+  planDynamicSpawns,
+  makeSpecialistHandler,
+  CAPABILITY_TO_SPECIALIST,
+} from "./dynamic-agents";
+export type { DynamicAgent, SubAgentSpec } from "./agent-contracts";
+
+// SharedContext blackboard + agent handler registry + executor contracts (Task I).
+// These exports wire the new execution gateway: AgentRuntime.executeTask()
+// dispatches to handlers in agent-handlers.ts, which read/write the
+// sharedContext blackboard to pass work products between agents.
+export { SharedContextImpl, sharedContext } from "./shared-context";
+export {
+  agentHandlers,
+  getAgentHandler,
+  AGENT_HANDLER_COUNT,
+} from "./agent-handlers";
+export type {
+  SharedContext,
+  AgentHandler,
+  AgentExecutionContext,
+  AgentExecutionResult,
+  SkillContent,
+} from "./agent-contracts";
+
+// SkillInjector (Task K) — resolves which SKILL.md files are relevant to each
+// agent role and loads their content for injection into the agent's execution
+// context. These exports are ADDITIVE and do not modify any Task I / Task J /
+// Task L symbols above.
+export {
+  injectSkills,
+  getInjectionPlan,
+  enrichSkillsWithLoaderContent,
+  getAgentSkillMap,
+  getCapabilitySkillMap,
+  getSkillFolder,
+} from "./skill-injector";

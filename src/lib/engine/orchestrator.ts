@@ -34,6 +34,12 @@ import { tokenBudgetManager } from "./provider-abstraction";
 import { generateForTarget, type DatabaseChoice } from "./generators";
 import { askQuestionIfNeeded, detectAmbiguity, AMBIGUITY_THRESHOLD } from "./skills/ambiguity-detector";
 import { agentRuntime, initAgentRuntime } from "./agent-runtime";
+// SharedContext (Task I) — the inter-agent blackboard. The orchestrator
+// writes the initial build context here at startBuild() so downstream
+// agents (Architect → Generators → Reviewer → Builder) can read it instead
+// of receiving it via direct calls. See ./shared-context.ts for the
+// key-naming convention.
+import { sharedContext } from "./shared-context";
 
 // Debounced trace sync — POSTs the client-side executionEngine trace + agent
 // activations to the server so /api/build/trace and /api/agents/trace return
@@ -225,6 +231,32 @@ export class Orchestrator {
       );
     }
 
+    // ---- SharedContext: fresh blackboard + initial context writes ----------
+    // Clear any stale entries from a previous build, then publish the key
+    // context every downstream agent will read. Agents no longer receive
+    // this via direct calls — they read it from the shared blackboard:
+    //   Planner   reads "prompt" + "capabilities"
+    //   Architect reads "plan" + "targets" + "decisions"
+    //   Generator reads "architecture" + "targets[i]"
+    //   Reviewer  reads "code:<target>"
+    //   Builder   reads "review:<target>"
+    // Keys written here are the build's initial inputs; per-agent outputs
+    // are written by the agents themselves (Task I handlers).
+    sharedContext.clear();
+    sharedContext.write("prompt", prompt);
+    sharedContext.write("targets", targets);
+    sharedContext.write("capabilities", capabilities);
+    sharedContext.write("decisions", decisions);
+    sharedContext.write("database", database);
+    sharedContext.write("projectId", projectId ?? `proj-${Date.now()}`);
+    observability.recordEvent({
+      id: `ev-${Date.now()}-shared`,
+      ts: Date.now(),
+      type: "memory-written",
+      message: `SharedContext initialized: ${sharedContext.readAll ? Object.keys(sharedContext.readAll()).length : 0} keys (prompt, targets, capabilities, decisions, database, projectId)`,
+      level: "debug",
+    });
+
     // Workflow selection
     const workflow = workflowEngine.select(prompt);
     observability.recordEvent({
@@ -268,8 +300,117 @@ export class Orchestrator {
     });
     const totalFiles = generationResults.reduce((n, g) => n + g.files.length, 0);
 
+    // Publish per-target generation outputs to the SharedContext blackboard
+    // (key convention: "code:<target>"). Downstream agents (Reviewer, Builder)
+    // read these instead of receiving them via direct calls. The direct
+    // generation above is the backward-compat fallback; when Task I's
+    // handlers are wired, the per-target generation tasks below will produce
+    // these same keys via AgentExecutionResult.sharedWrites.
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
+      const g = generationResults[i];
+      sharedContext.write(`code:${t.kind}`, g.files);
+    }
+    sharedContext.write("generatedFilesCount", totalFiles);
+
     // Compile DAG
     const tasks = workflowEngine.compile(workflow, workflow.stages.map((s) => s.id as StageId));
+
+    // ---- Parallel per-target generation tasks ------------------------------
+    // The compiled DAG has a SINGLE "generate" stage task. We augment it
+    // with one "Generating (<target>)" task per detected target. These
+    // tasks all depend on the SAME architecture predecessors (the architect
+    // stage task + architect gate) and have NO dependencies on each other →
+    // the ExecutionEngine dispatches them in the SAME parallelBatch
+    // (maxParallel=4), proving true parallel scheduling in /api/build/trace.
+    //
+    // Agent attribution uses the kind-appropriate generator so the agent
+    // trace shows the right specialist per target (Forge=web, Anvil=desktop,
+    // Droid=android, etc.).
+    //
+    // Each task carries the target spec in its description (JSON-encoded)
+    // so the AgentRuntime handler (Task I) can read it and call
+    // generateForTarget with the right arguments. Until Task I's executor
+    // is wired, these tasks complete as no-ops — the real generation
+    // already ran above (backward-compat fallback) and the workspace is
+    // already materialized below.
+    const generateStageTask = tasks.find((t) => t.stageId === "generate" && !t.gate);
+    // The generate stage task's dependsOn are the architect stage task +
+    // architect gate — i.e. the architecture predecessors. The per-target
+    // gen tasks share these so they become ready in the SAME scheduler
+    // tick as the generate stage task → same parallelBatch.
+    let archDeps: string[] = generateStageTask?.dependsOn ?? [];
+    if (archDeps.length === 0) {
+      // Fallback for workflows without an explicit generate stage task:
+      // depend on the architect gate (or architect stage task) directly.
+      const archGate = tasks.find((t) => t.stageId === "architect" && t.gate === "architecture");
+      const archStage = tasks.find((t) => t.stageId === "architect" && !t.gate);
+      archDeps = archGate?.id ? [archGate.id] : archStage?.id ? [archStage.id] : [];
+    }
+
+    // Map each platform kind to its specialist generator agent.
+    const targetAgent: Partial<Record<PlatformKind, AgentRole>> = {
+      windows: "desktop-generator",
+      android: "android-generator",
+      web: "frontend-generator",
+      api: "backend-generator",
+      cli: "backend-generator",
+      library: "backend-generator",
+    };
+
+    const perTargetGenTasks: Task[] = targets.map((t, i) => {
+      const targetId = `t${i + 1}`;
+      const name = promptToName(prompt) || `App${i + 1}`;
+      const task = makeTask({
+        workflowId: workflow.id,
+        stageId: "generate",
+        title: `Generating (${t.label})`,
+        description: JSON.stringify({
+          kind: t.kind,
+          stack: t.stack,
+          name,
+          targetId,
+          label: t.label,
+          role: t.role,
+          capabilities: t.capabilities,
+          database,
+        }),
+        agent: targetAgent[t.kind] ?? "frontend-generator",
+        dependsOn: [...archDeps], // copy — same as generate stage task → parallel
+      });
+      return task;
+    });
+
+    // Insert the per-target tasks right after the generate stage task so the
+    // trace's scheduledAt ordering is stable + readable. If no generate stage
+    // task exists, append them at the end.
+    if (generateStageTask) {
+      const idx = tasks.indexOf(generateStageTask);
+      tasks.splice(idx + 1, 0, ...perTargetGenTasks);
+    } else {
+      tasks.push(...perTargetGenTasks);
+    }
+
+    // Extend the generate stage's compilation gate to also depend on the
+    // per-target tasks — otherwise the gate would fire as soon as the
+    // (no-op) generate stage task completes, racing the parallel tasks.
+    // Now the gate waits for ALL parallel generation tasks to finish.
+    for (const t of tasks) {
+      if (t.stageId === "generate" && t.gate === "compilation") {
+        for (const pt of perTargetGenTasks) {
+          if (!t.dependsOn.includes(pt.id)) t.dependsOn.push(pt.id);
+        }
+      }
+    }
+
+    observability.recordEvent({
+      id: `ev-${Date.now()}-par-gen`,
+      ts: Date.now(),
+      type: "task-queued",
+      stageId: "generate",
+      message: `Created ${perTargetGenTasks.length} parallel generation tasks (dependsOn arch: [${archDeps.join(", ")}])`,
+      level: "info",
+    });
 
     // Materialize generated files to a real on-disk workspace so the
     // compilation gate can run `tsc --noEmit` against them. Attach the
@@ -302,6 +443,15 @@ export class Orchestrator {
         // workspace write is best-effort; gates will skip if no workspace
       }
     }
+    // Publish per-target workspace paths to the SharedContext blackboard.
+    // Downstream build/review agents read "workspace:<target>" to find the
+    // on-disk location of each target's materialized files.
+    sharedContext.write("workspaces", workspacePaths);
+    for (let i = 0; i < targets.length; i++) {
+      const ws = workspacePaths[`t${i + 1}`];
+      if (ws) sharedContext.write(`workspace:${targets[i].kind}`, ws);
+    }
+
     // Annotate the compilation gate task with the web workspace (runs tsc).
     // For multi-target builds, attach the primary target's workspace + type.
     // Desktop/android static validation happens via their own gate tasks below.

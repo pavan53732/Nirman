@@ -18,8 +18,25 @@
 // to `attach()`. This keeps the tracer decoupled from the engine internals
 // while still giving us the agent attribution we need.
 
-import type { AgentLayer, AgentRole, EngineEvent, Task } from "./types";
+import type {
+  AgentLayer,
+  AgentRole,
+  Capability,
+  EngineEvent,
+  PlatformKind,
+  Task,
+} from "./types";
+import type {
+  AgentExecutionContext,
+  AgentExecutionResult,
+  AgentHandler,
+  SkillContent,
+  SubAgentSpec,
+} from "./agent-contracts";
 import { agents } from "./data/agents";
+import { getAgentHandler } from "./agent-handlers";
+import { sharedContext } from "./shared-context";
+import { contextBuilder, projectMemory } from "./memories";
 
 /* ---------------- Agent metadata (sourced from data/agents.ts) ---------------- */
 
@@ -217,6 +234,164 @@ export class AgentRuntime {
   clear(): void {
     this.activations.clear();
     this.activeCount.clear();
+  }
+
+  /* ---------------- Execution Gateway ---------------- */
+  //
+  // The methods below turn AgentRuntime from a pure TRACER into the EXECUTION
+  // GATEWAY — the single path through which all agent work flows. The
+  // orchestrator no longer calls generators directly; it submits Tasks to
+  // the ExecutionEngine, which (in turn) calls AgentRuntime.executeTask().
+  //
+  // executeTask() is responsible for:
+  //   1. Looking up the agent's handler by role (from agent-handlers.ts)
+  //   2. Building the AgentExecutionContext (memory slice + skills + shared
+  //      context + spawnSubAgent + emit)
+  //   3. Executing the handler
+  //   4. Persisting the result's memoryWrites to projectMemory
+  //   5. Persisting the result's sharedWrites to the SharedContext blackboard
+  //   6. Returning the result (with durationMs filled in)
+  //
+  // The tracer side (attach / handleEvent / getActivations / getSummary)
+  // remains intact and continues to subscribe to the ExecutionEngine event
+  // bus. Tracer-side recording and executor-side execution are COMPLEMENTARY:
+  // the tracer proves agents activate; the executor proves they produce
+  // outputs. Both run on every build.
+
+  /**
+   * Execute a single task by dispatching to its registered agent handler.
+   *
+   * This is the SINGLE ENTRY POINT for executing agent work in Nirman. The
+   * ExecutionEngine calls this (directly or via a wrapper) for every Task it
+   * schedules. Handlers are looked up by `task.agent` in the
+   * {@link agentHandlers} registry.
+   *
+   * @param task         The task being executed (carries `agent`, `id`,
+   *                     `title`, `stageId`).
+   * @param prompt       The original user prompt.
+   * @param capabilities Detected capabilities (auth, payments, offline-sync, …).
+   * @returns            The handler's result, with `durationMs` filled in. If
+   *                     no handler is registered for `task.agent`, returns a
+   *                     structured failure (status="failure", error=…).
+   */
+  async executeTask(
+    task: Task,
+    prompt: string,
+    capabilities: Capability[]
+  ): Promise<AgentExecutionResult> {
+    const start = Date.now();
+    const handler: AgentHandler | undefined = getAgentHandler(task.agent);
+    if (!handler) {
+      return {
+        status: "failure",
+        error: `No handler registered for agent: ${task.agent}`,
+        durationMs: Date.now() - start,
+      };
+    }
+
+    // Build the agent's memory slice via the ContextBuilder. We use the
+    // legacy entry point (buildForAgent) which returns just the slice + a
+    // zero token estimate; that's all the executor needs at this layer.
+    const memorySlice = contextBuilder.buildForAgent(task.agent, { prompt }).memorySlice;
+
+    // Skills will be injected by Task K's skill-injector. For now we pass an
+    // empty array — handlers are designed to degrade gracefully when no
+    // SKILL.md content is available (they fall back to the prompt + memory).
+    const skills: SkillContent[] = [];
+
+    const ctx: AgentExecutionContext = {
+      task,
+      prompt,
+      memory: memorySlice,
+      skills,
+      capabilities,
+      platform: this.inferPlatform(task),
+      shared: sharedContext,
+      spawnSubAgent: (role: string, spec: SubAgentSpec) =>
+        this.spawnSubAgent(role, spec, prompt, capabilities),
+      // Emit is currently a no-op: the ExecutionEngine's emit is private and
+      // we don't own execution-engine.ts (Task M does). The tracer side of
+      // this runtime already observes task-level events via the bus, so
+      // observability isn't broken — agent-emitted custom events just aren't
+      // forwarded yet. Task M can wire this up later by exposing a public
+      // engine.emit() or accepting a callback.
+      emit: (_event: { type: string; message: string; level?: string }) => {
+        /* no-op — see comment above */
+      },
+    };
+
+    try {
+      const result: AgentExecutionResult = await handler(ctx);
+      result.durationMs = Date.now() - start;
+
+      // Persist memory writes. The handler declares WHAT to write (kind,
+      // title, content); the runtime commits it with the agent role as the
+      // source — keeping memory attribution honest (the runtime is the only
+      // thing that mutates project memory).
+      if (result.memoryWrites) {
+        for (const w of result.memoryWrites) {
+          projectMemory.write(w.kind, w.title, w.content, task.agent);
+        }
+      }
+
+      // Commit shared-context writes. Handlers MAY have already written to
+      // `ctx.shared` directly (the spec allows it), but we re-commit from
+      // the declared `sharedWrites` to keep the audit trail honest and
+      // ensure downstream agents see consistent state even if a handler
+      // forgot to call ctx.shared.write().
+      if (result.sharedWrites) {
+        for (const w of result.sharedWrites) {
+          sharedContext.write(w.key, w.value);
+        }
+      }
+
+      return result;
+    } catch (err) {
+      return {
+        status: "failure",
+        error: String(err),
+        durationMs: Date.now() - start,
+      };
+    }
+  }
+
+  /**
+   * Infer the platform target for a task by inspecting its title and stageId.
+   * Used to set `AgentExecutionContext.platform` for generator/build/test/
+   * packaging handlers that need a platform key but whose Task doesn't carry
+   * one explicitly.
+   *
+   * Returns undefined if no platform signal is found — handlers then fall
+   * back to "web" (the legacy default).
+   */
+  private inferPlatform(task: Task): PlatformKind | undefined {
+    const signal = `${task.title} ${task.stageId ?? ""}`;
+    if (/windows|desktop|winui|wpf|tauri/i.test(signal)) return "windows";
+    if (/android|kotlin|compose|flutter/i.test(signal)) return "android";
+    if (/web|next|react|frontend|frontend-generator/i.test(signal)) return "web";
+    if (/\bcli\b|rust-cli|cobra|clap/i.test(signal)) return "cli";
+    return undefined;
+  }
+
+  /**
+   * Spawn a dynamic sub-agent. Currently a placeholder that returns a
+   * structured-success result — the real lifecycle (registry, kill, lineage
+   * tracking) is owned by Task J's DynamicAgentRegistry in dynamic-agents.ts.
+   *
+   * The interface is correct today so handlers can call `ctx.spawnSubAgent`
+   * without breaking; Task J will swap the implementation to dispatch
+   * through the registry once it lands.
+   */
+  private async spawnSubAgent(
+    role: string,
+    spec: SubAgentSpec,
+    _prompt: string,
+    _capabilities: Capability[]
+  ): Promise<AgentExecutionResult> {
+    return {
+      status: "success",
+      output: `Sub-agent ${role} spawned for: ${spec.objective}`,
+    };
   }
 }
 
