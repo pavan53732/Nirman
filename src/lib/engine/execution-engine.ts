@@ -199,6 +199,40 @@ export class ExecutionEngine {
     for (const t of tasks) this.submit(t);
   }
 
+  /**
+   * Insert a task into a RUNNING graph. Used by the Verification Loop (Wave
+   * 1C, future) to add fix tasks when verification fails. The task is
+   * scheduled immediately if its dependencies are satisfied.
+   *
+   * This is the V2 dynamic task insertion capability — distinct from the
+   * initial `submitAll()` bulk-load because it happens DURING execution,
+   * after the engine has already begun dispatching other tasks. Operationally
+   * it delegates to `submit()` (which registers the task in `this.tasks`,
+   * records `scheduledAt` in the trace, assigns the initial status, emits a
+   * `task-queued` event, and calls `trySchedule()` so the task is picked up
+   * immediately if its dependencies are satisfied), then emits an additional
+   * observability event so subscribers can distinguish insertions from the
+   * initial graph.
+   *
+   * Backward compat: this method is additive — `submitAll()` and `submit()`
+   * are unchanged. Existing callers continue to work as before.
+   */
+  insertTask(task: Task): void {
+    // submit() handles: tasks.set, trace.recordScheduled, status assignment,
+    // task-queued emit, and trySchedule(). No need to duplicate that logic.
+    this.submit(task);
+    // Additional observability marker: this task was dynamically inserted
+    // into a running graph, not part of the initial submitAll() batch.
+    this.emit({
+      type: "task-queued",
+      taskId: task.id,
+      stageId: task.stageId,
+      workflowId: task.workflowId,
+      message: `Inserted into running graph: ${task.title}`,
+      level: "info",
+    });
+  }
+
   private trySchedule(): void {
     if (this.cancelled) {
       this.emit({ type: "task-failed", message: `trySchedule: cancelled=true, skipping`, level: "debug" });

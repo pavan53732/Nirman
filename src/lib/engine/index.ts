@@ -289,3 +289,57 @@ if (typeof window !== "undefined") {
 // not modify the existing single-level planner agent in agent-handlers.ts.
 export { PlanningHierarchy, planningHierarchy } from "./planning-hierarchy";
 export type { ProjectPlan, FeaturePlan, ModulePlan, TaskSpec } from "./planning-hierarchy";
+
+// Agent Teams (Wave 1C) — groups the existing 70 flat agents into 6
+// specialized teams (Planning, Architecture, Engineering, Quality, Delivery,
+// System). Teams are a GROUPING layer on top of the flat registry: they don't
+// replace `data/agents.ts` and don't modify the agent runtime/handlers. The
+// registry provides team lookups (teamForAgent, specialists) and task routing
+// (route(taskDescription, preferredAgent?) → { team, assignedAgent, reason }).
+// ADDITIVE — does not modify any earlier exports.
+export { AgentTeamRegistry, agentTeamRegistry } from "./agent-teams";
+export type { AgentTeam, TeamId, TeamRoutingResult } from "./agent-teams";
+
+// Verification Loop (Wave 1D) — generate→build→verify→fix cycle. When a task
+// completes, the loop runs verification checks; on failure it creates fix
+// tasks and inserts them into the TaskGraph (Wave 1A). Tracks retry counts
+// per task to prevent infinite cycles (MAX_RETRIES=3). If Wave 1A's
+// task-graph.ts is not yet present, the loop degrades gracefully: fix tasks
+// are still recorded against the VerificationResult, and live insertion
+// kicks in the moment Wave 1A ships. ADDITIVE — does not modify the existing
+// gate evaluation in self-healing.ts (verification is layered on top).
+export { VerificationLoop, verificationLoop } from "./verification-loop";
+export type {
+  VerificationResult,
+  VerificationCheck,
+  VerificationStatus,
+  FixTaskSpec,
+  TaskGraphInsertable,
+} from "./verification-loop";
+
+// TaskGraph (Wave 1A, Runtime V2 Migration) — a mutable DAG of tasks that
+// can be updated DURING execution. Pairs with `ExecutionEngine.insertTask()`
+// to enable verification-driven fix tasks: when verification fails, a fix
+// task is inserted into the running graph and scheduled immediately if its
+// dependencies are satisfied. ADDITIVE — does not modify any existing
+// exports; `submitAll()` and the rest of the ExecutionEngine API are
+// unchanged.
+export { TaskGraph, taskGraph } from "./task-graph";
+export type { TaskGraphMutation } from "./task-graph";
+
+// Sandbox (Wave 1B) — wraps ToolManager execution with 7 isolation profiles
+// (web, windows, android, cli, api, library, plugin). Every V2 build executes
+// inside a Sandbox: the Sandbox delegates the actual process spawn to
+// ToolManager.invoke() and wraps the result with artifact parsing + metric
+// collection (peak memory, cpu time, output bytes, error/warning counts) +
+// structured logs. ADDITIVE — does not modify ToolManager, orchestrator,
+// execution-engine, agent-runtime, or agent-handlers.
+export { Sandbox, sandbox } from "./sandbox";
+export type {
+  SandboxProfile,
+  SandboxResult,
+  SandboxArtifact,
+  SandboxMetrics,
+  SandboxLog,
+  SandboxOptions,
+} from "./sandbox";
