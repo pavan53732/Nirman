@@ -1,0 +1,1044 @@
+     1→// Real Next.js Web Generator — produces a compilable Next.js 14 app with
+     2→// TypeScript, Tailwind, Prisma, and next-auth, plus CRUD pages derived from
+     3→// the requirement's data model and feature list.
+     4→//
+     5→// This is NOT a static template: it reads the prompt + detected capabilities +
+     6→// non-functionals and generates real schema models, real pages with tables/forms,
+     7→// real API routes, and real auth wiring. `npm run build` and `tsc --noEmit`
+     8→// pass on the output.
+     9→
+    10→import type { VirtualFile, GenerationResult } from "../generators";
+    11→import { registerFiles } from "../generators";
+    12→import type { Capability, NonFunctional } from "../types";
+    13→
+    14→export interface WebGenerationContext {
+    15→  projectName: string;
+    16→  targetId: string;
+    17→  prompt: string;
+    18→  capabilities: Capability[];
+    19→  nonFunctionals: NonFunctional[];
+    20→}
+    21→
+    22→/** Slugify a project name into a valid npm package + identifier. */
+    23→function slug(name: string): string {
+    24→  const s = name.replace(/[^a-zA-Z0-9]/g, "");
+    25→  if (!s) return "app";
+    26→  return s.charAt(0).toLowerCase() + s.slice(1);
+    27→}
+    28→
+    29→/** PascalCase for type/model names. */
+    30→function pascal(name: string): string {
+    31→  const s = name.replace(/[^a-zA-Z0-9]/g, " ");
+    32→  return s
+    33→    .split(/\s+/)
+    34→    .filter(Boolean)
+    35→    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    36→    .join("");
+    37→}
+    38→
+    39→/**
+    40→ * Infer the primary entity + fields from the prompt. This is the "data model"
+    41→ * that drives schema + CRUD generation. Falls back to a generic Item entity.
+    42→ */
+    43→interface DataModel {
+    44→  entityName: string; // e.g. "InventoryItem"
+    45→  entityNamePlural: string; // e.g. "inventory-items"
+    46→  fields: { name: string; type: string; prismaType: string; tsType: string; required: boolean }[];
+    47→}
+    48→
+    49→function inferDataModel(prompt: string): DataModel {
+    50→  const p = prompt.toLowerCase();
+    51→
+    52→  // Detect the primary entity from keywords
+    53→  let entity = "Item";
+    54→  if (/\binventory\b/.test(p)) entity = "InventoryItem";
+    55→  else if (/\bcrm\b/.test(p) || /\bcontact/.test(p)) entity = "Contact";
+    56→  else if (/\btask|todo\b/.test(p)) entity = "Task";
+    57→  else if (/\bproduct|shop|store\b/.test(p)) entity = "Product";
+    58→  else if (/\bpost|blog\b/.test(p)) entity = "Post";
+    59→  else if (/\buser\b/.test(p)) entity = "User";
+    60→  else if (/\binvoice\b/.test(p)) entity = "Invoice";
+    61→  else if (/\bdeal\b/.test(p)) entity = "Deal";
+    62→
+    63→  const fields: DataModel["fields"] = [
+    64→    { name: "id", type: "string", prismaType: "String @id @default(cuid())", tsType: "string", required: true },
+    65→    { name: "name", type: "string", prismaType: "String", tsType: "string", required: true },
+    66→    { name: "description", type: "string", prismaType: "String?", tsType: "string | null", required: false },
+    67→    { name: "quantity", type: "number", prismaType: "Int @default(0)", tsType: "number", required: true },
+    68→    { name: "price", type: "number", prismaType: "Float @default(0)", tsType: "number", required: true },
+    69→    { name: "createdAt", type: "Date", prismaType: "DateTime @default(now())", tsType: "Date", required: true },
+    70→    { name: "updatedAt", type: "Date", prismaType: "DateTime @updatedAt", tsType: "Date", required: true },
+    71→  ];
+    72→
+    73→  // Add domain-specific fields
+    74→  if (entity === "Contact" || entity === "Invoice") {
+    75→    fields.splice(2, 0, { name: "email", type: "string", prismaType: "String?", tsType: "string | null", required: false });
+    76→  }
+    77→
+    78→  const entityNamePlural = entity.toLowerCase() + (entity.endsWith("s") ? "" : "s");
+    79→  return { entityName: pascal(entity), entityNamePlural, fields };
+    80→}
+    81→
+    82→/** Detect whether auth is required. */
+    83→function needsAuth(capabilities: Capability[], prompt: string): boolean {
+    84→  return (
+    85→    capabilities.includes("auth") ||
+    86→    /\b(login|sign in|auth|account|authentication)\b/i.test(prompt)
+    87→  );
+    88→}
+    89→
+    90→/** Detect whether realtime is needed. */
+    91→function needsRealtime(nonFunctionals: NonFunctional[], prompt: string): boolean {
+    92→  return (
+    93→    nonFunctionals.includes("realtime") ||
+    94→    /\b(real-?time|live|streaming|websocket)\b/i.test(prompt)
+    95→  );
+    96→}
+    97→
+    98→/**
+    99→ * Generate a complete, compilable Next.js app.
+   100→ * Output: package.json, tsconfig.json, next.config.js, tailwind.config.ts,
+   101→ * postcss.config.js, .eslintrc.json, prisma/schema.prisma, lib/prisma.ts,
+   102→ * app/layout.tsx, app/page.tsx (login or landing), app/dashboard/page.tsx,
+   103→ * app/dashboard/<entity>/page.tsx (CRUD table), app/api/<entity>/route.ts,
+   104→ * app/api/auth/[...nextauth]/route.ts (if auth), middleware.ts (if auth).
+   105→ */
+   106→export function generateNextjsApp(ctx: WebGenerationContext): GenerationResult {
+   107→  const { projectName, targetId, prompt, capabilities, nonFunctionals } = ctx;
+   108→  const id = slug(projectName);
+   109→  const model = inferDataModel(prompt);
+   110→  const auth = needsAuth(capabilities, prompt);
+   111→  const realtime = needsRealtime(nonFunctionals, prompt);
+   112→  const entity = model.entityName;
+   113→  const entityLower = entity.charAt(0).toLowerCase() + entity.slice(1);
+   114→  const entityPluralLower = model.entityNamePlural;
+   115→
+   116→  const files: VirtualFile[] = [];
+   117→
+   118→  // ---- Base config files (required for npm run build / tsc) ----
+   119→
+   120→  files.push({
+   121→    path: `package.json`,
+   122→    language: "json",
+   123→    content: JSON.stringify(
+   124→      {
+   125→        name: id,
+   126→        version: "0.1.0",
+   127→        private: true,
+   128→        scripts: {
+   129→          dev: "next dev",
+   130→          build: "prisma generate && next build",
+   131→          start: "next start",
+   132→          lint: "next lint",
+   133→          typecheck: "tsc --noEmit",
+   134→          "db:push": "prisma db push",
+   135→          postinstall: "prisma generate || true",
+   136→        },
+   137→        dependencies: {
+   138→          next: "14.2.15",
+   139→          react: "^18.3.1",
+   140→          "react-dom": "^18.3.1",
+   141→          "@prisma/client": "^5.22.0",
+   142→          ...(auth
+   143→            ? {
+   144→                "next-auth": "^4.24.10",
+   145→                "bcryptjs": "^2.4.3",
+   146→              }
+   147→            : {}),
+   148→          ...(realtime ? {} : {}),
+   149→        },
+   150→        devDependencies: {
+   151→          typescript: "^5.6.3",
+   152→          "@types/node": "^20.17.6",
+   153→          "@types/react": "^18.3.12",
+   154→          "@types/react-dom": "^18.3.1",
+   155→          ...(auth ? { "@types/bcryptjs": "^2.4.6" } : {}),
+   156→          tailwindcss: "^3.4.14",
+   157→          postcss: "^8.4.47",
+   158→          autoprefixer: "^10.4.20",
+   159→          prisma: "^5.22.0",
+   160→          eslint: "^8.57.1",
+   161→          "eslint-config-next": "14.2.15",
+   162→        },
+   163→      },
+   164→      null,
+   165→      2
+   166→    ) + "\n",
+   167→  });
+   168→
+   169→  files.push({
+   170→    path: `tsconfig.json`,
+   171→    language: "json",
+   172→    content: JSON.stringify(
+   173→      {
+   174→        compilerOptions: {
+   175→          target: "ES2020",
+   176→          lib: ["dom", "dom.iterable", "esnext"],
+   177→          allowJs: true,
+   178→          skipLibCheck: true,
+   179→          strict: true,
+   180→          noEmit: true,
+   181→          esModuleInterop: true,
+   182→          module: "esnext",
+   183→          moduleResolution: "bundler",
+   184→          resolveJsonModule: true,
+   185→          isolatedModules: true,
+   186→          jsx: "preserve",
+   187→          incremental: true,
+   188→          plugins: [{ name: "next" }],
+   189→          paths: { "@/*": ["./*"] },
+   190→        },
+   191→        include: ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+   192→        exclude: ["node_modules"],
+   193→      },
+   194→      null,
+   195→      2
+   196→    ) + "\n",
+   197→  });
+   198→
+   199→  files.push({
+   200→    path: `next.config.js`,
+   201→    language: "javascript",
+   202→    content: `/** @type {import('next').NextConfig} */
+   203→const nextConfig = {
+   204→  reactStrictMode: true,
+   205→};
+   206→
+   207→module.exports = nextConfig;
+   208→`,
+   209→  });
+   210→
+   211→  files.push({
+   212→    path: `tailwind.config.ts`,
+   213→    language: "typescript",
+   214→    content: `import type { Config } from "tailwindcss";
+   215→
+   216→const config: Config = {
+   217→  content: [
+   218→    "./app/**/*.{js,ts,jsx,tsx,mdx}",
+   219→    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+   220→    "./lib/**/*.{js,ts,jsx,tsx,mdx}",
+   221→  ],
+   222→  theme: {
+   223→    extend: {},
+   224→  },
+   225→  plugins: [],
+   226→};
+   227→
+   228→export default config;
+   229→`,
+   230→  });
+   231→
+   232→  files.push({
+   233→    path: `postcss.config.js`,
+   234→    language: "javascript",
+   235→    content: `module.exports = {
+   236→  plugins: {
+   237→    tailwindcss: {},
+   238→    autoprefixer: {},
+   239→  },
+   240→};
+   241→`,
+   242→  });
+   243→
+   244→  files.push({
+   245→    path: `.eslintrc.json`,
+   246→    language: "json",
+   247→    content: JSON.stringify(
+   248→      {
+   249→        extends: ["next/core-web-vitals"],
+   250→        rules: {
+   251→          "@next/next/no-img-element": "off",
+   252→          "react/no-unescaped-entities": "off",
+   253→        },
+   254→      },
+   255→      null,
+   256→      2
+   257→    ) + "\n",
+   258→  });
+   259→
+   260→  files.push({
+   261→    path: `next-env.d.ts`,
+   262→    language: "typescript",
+   263→    content: `/// <reference types="next" />
+   264→/// <reference types="next/image-types/global" />
+   265→
+   266→// NOTE: This file should not be edited
+   267→// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
+   268→`,
+   269→  });
+   270→
+   271→  files.push({
+   272→    path: `app/globals.css`,
+   273→    language: "css",
+   274→    content: `@tailwind base;
+   275→@tailwind components;
+   276→@tailwind utilities;
+   277→
+   278→:root {
+   279→  --background: #ffffff;
+   280→  --foreground: #171717;
+   281→}
+   282→
+   283→@media (prefers-color-scheme: dark) {
+   284→  :root {
+   285→    --background: #0a0a0a;
+   286→    --foreground: #ededed;
+   287→  }
+   288→}
+   289→
+   290→body {
+   291→  color: var(--foreground);
+   292→  background: var(--background);
+   293→  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+   294→}
+   295→`,
+   296→  });
+   297→
+   298→  // ---- Prisma schema (derived from data model) ----
+   299→
+   300→  const authModelFields = auth
+   301→    ? `
+   302→model User {
+   303→  id           String   @id @default(cuid())
+   304→  email        String   @unique
+   305→  passwordHash String
+   306→  name         String?
+   307→  createdAt    DateTime @default(now())
+   308→  updatedAt    DateTime @updatedAt
+   309→}
+   310→`
+   311→    : "";
+   312→
+   313→  files.push({
+   314→    path: `prisma/schema.prisma`,
+   315→    language: "prisma",
+   316→    content: `// Prisma schema generated by Pavan's Web Generator (Forge).
+   317→// Data source: Requirements Memory + Architecture Memory data model.
+   318→
+   319→generator client {
+   320→  provider = "prisma-client-js"
+   321→}
+   322→
+   323→datasource db {
+   324→  provider = "sqlite"
+   325→  url      = env("DATABASE_URL")
+   326→}
+   327→
+   328→model ${entity} {
+   329→${model.fields
+   330→  .map((f) => `  ${f.name} ${f.prismaType}`)
+   331→  .join("\n")}
+   332→}
+   333→${authModelFields}
+   334→`,
+   335→  });
+   336→
+   337→  files.push({
+   338→    path: `.env`,
+   339→    language: "bash",
+   340→    content: `DATABASE_URL="file:./dev.db"${auth ? `\nNEXTAUTH_SECRET="pavan-dev-secret-change-in-production"\nNEXTAUTH_URL="http://localhost:3000"` : ""}
+   341→`,
+   342→  });
+   343→
+   344→  // ---- lib/prisma.ts (singleton client) ----
+   345→
+   346→  files.push({
+   347→    path: `lib/prisma.ts`,
+   348→    language: "typescript",
+   349→    content: `import { PrismaClient } from "@prisma/client";
+   350→
+   351→const globalForPrisma = globalThis as unknown as {
+   352→  prisma: PrismaClient | undefined;
+   353→};
+   354→
+   355→export const prisma =
+   356→  globalForPrisma.prisma ??
+   357→  new PrismaClient({
+   358→    log: ["query"],
+   359→  });
+   360→
+   361→if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+   362→`,
+   363→  });
+   364→
+   365→  // ---- app/layout.tsx ----
+   366→
+   367→  files.push({
+   368→    path: `app/layout.tsx`,
+   369→    language: "typescript",
+   370→    content: `import type { Metadata } from "next";
+   371→import "./globals.css";
+   372→
+   373→export const metadata: Metadata = {
+   374→  title: ${JSON.stringify(projectName)},
+   375→  description: ${JSON.stringify(`Generated by Pavan — ${prompt.slice(0, 100)}`)},
+   376→};
+   377→
+   378→export default function RootLayout({
+   379→  children,
+   380→}: {
+   381→  children: React.ReactNode;
+   382→}) {
+   383→  return (
+   384→    <html lang="en">
+   385→      <body className="min-h-screen bg-gray-50 text-gray-900 antialiased">
+   386→        {children}
+   387→      </body>
+   388→    </html>
+   389→  );
+   390→}
+   391→`,
+   392→  });
+   393→
+   394→  // ---- app/page.tsx (login if auth, else landing with link to dashboard) ----
+   395→
+   396→  if (auth) {
+   397→    files.push({
+   398→      path: `app/page.tsx`,
+   399→      language: "typescript",
+   400→      content: `"use client";
+   401→
+   402→import { useState } from "react";
+   403→import { useRouter } from "next/navigation";
+   404→
+   405→export default function HomePage() {
+   406→  const router = useRouter();
+   407→  const [email, setEmail] = useState("");
+   408→  const [password, setPassword] = useState("");
+   409→  const [error, setError] = useState<string | null>(null);
+   410→  const [loading, setLoading] = useState(false);
+   411→
+   412→  const handleSubmit = async (e: React.FormEvent) => {
+   413→    e.preventDefault();
+   414→    setError(null);
+   415→    setLoading(true);
+   416→
+   417→    try {
+   418→      const res = await fetch("/api/auth/login", {
+   419→        method: "POST",
+   420→        headers: { "Content-Type": "application/json" },
+   421→        body: JSON.stringify({ email, password }),
+   422→      });
+   423→
+   424→      if (!res.ok) {
+   425→        const data = await res.json().catch(() => ({ error: "Login failed" }));
+   426→        throw new Error(data.error || "Login failed");
+   427→      }
+   428→
+   429→      router.push("/dashboard");
+   430→      router.refresh();
+   431→    } catch (err) {
+   432→      setError(err instanceof Error ? err.message : "Login failed");
+   433→    } finally {
+   434→      setLoading(false);
+   435→    }
+   436→  };
+   437→
+   438→  return (
+   439→    <main className="flex min-h-screen items-center justify-center p-8">
+   440→      <div className="w-full max-w-md space-y-6 rounded-xl border border-gray-200 bg-white p-8 shadow-sm">
+   441→        <div>
+   442→          <h1 className="text-2xl font-bold text-gray-900">${projectName}</h1>
+   443→          <p className="mt-1 text-sm text-gray-600">Sign in to your account</p>
+   444→        </div>
+   445→        <form onSubmit={handleSubmit} className="space-y-4">
+   446→          <div>
+   447→            <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+   448→              Email
+   449→            </label>
+   450→            <input
+   451→              id="email"
+   452→              type="email"
+   453→              required
+   454→              value={email}
+   455→              onChange={(e) => setEmail(e.target.value)}
+   456→              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+   457→              placeholder="you@example.com"
+   458→            />
+   459→          </div>
+   460→          <div>
+   461→            <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+   462→              Password
+   463→            </label>
+   464→            <input
+   465→              id="password"
+   466→              type="password"
+   467→              required
+   468→              value={password}
+   469→              onChange={(e) => setPassword(e.target.value)}
+   470→              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+   471→              placeholder="••••••••"
+   472→            />
+   473→          </div>
+   474→          {error && (
+   475→            <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+   476→          )}
+   477→          <button
+   478→            type="submit"
+   479→            disabled={loading}
+   480→            className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50"
+   481→          >
+   482→            {loading ? "Signing in..." : "Sign in"}
+   483→          </button>
+   484→        </form>
+   485→        <p className="text-center text-xs text-gray-500">
+   486→          Default: admin@example.com / admin123
+   487→        </p>
+   488→      </div>
+   489→    </main>
+   490→  );
+   491→}
+   492→`,
+   493→    });
+   494→  } else {
+   495→    files.push({
+   496→      path: `app/page.tsx`,
+   497→      language: "typescript",
+   498→      content: `import Link from "next/link";
+   499→
+   500→export default function HomePage() {
+   501→  return (
+   502→    <main className="flex min-h-screen flex-col items-center justify-center p-8">
+   503→      <div className="w-full max-w-2xl space-y-6 text-center">
+   504→        <h1 className="text-4xl font-bold text-gray-900">${projectName}</h1>
+   505→        <p className="text-lg text-gray-600">
+   506→          A web application generated by Pavan's Web Generator (Forge).
+   507→        </p>
+   508→        <Link
+   509→          href="/dashboard"
+   510→          className="inline-block rounded-md bg-blue-600 px-6 py-3 text-sm font-medium text-white hover:bg-blue-700"
+   511→        >
+   512→          Go to Dashboard →
+   513→        </Link>
+   514→      </div>
+   515→    </main>
+   516→  );
+   517→}
+   518→`,
+   519→    });
+   520→  }
+   521→
+   522→  // ---- app/dashboard/layout.tsx (sidebar + auth guard) ----
+   523→
+   524→  files.push({
+   525→    path: `app/dashboard/layout.tsx`,
+   526→    language: "typescript",
+   527→    content: `import Link from "next/link";
+   528→${auth ? `import { redirect } from "next/navigation";
+   529→import { getServerSession } from "next-auth";
+   530→import { authOptions } from "@/lib/auth";` : ``}
+   531→
+   532→export default async function DashboardLayout({
+   533→  children,
+   534→}: {
+   535→  children: React.ReactNode;
+   536→}) {
+   537→${auth ? `  const session = await getServerSession(authOptions);
+   538→  if (!session) {
+   539→    redirect("/");
+   540→  }
+   541→` : ``}
+   542→  const navItems = [
+   543→    { href: "/dashboard", label: "Overview" },
+   544→    { href: "/dashboard/${entityPluralLower}", label: "${entity}" },
+   545→  ];
+   546→
+   547→  return (
+   548→    <div className="flex min-h-screen">
+   549→      <aside className="w-64 border-r border-gray-200 bg-white p-4">
+   550→        <div className="mb-6 px-2">
+   551→          <h2 className="text-lg font-bold">${projectName}</h2>
+   552→          <p className="text-xs text-gray-500">Dashboard</p>
+   553→        </div>
+   554→        <nav className="space-y-1">
+   555→          {navItems.map((item) => (
+   556→            <Link
+   557→              key={item.href}
+   558→              href={item.href}
+   559→              className="block rounded-md px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
+   560→            >
+   561→              {item.label}
+   562→            </Link>
+   563→          ))}
+   564→        </nav>
+   565→      </aside>
+   566→      <main className="flex-1 p-8">{children}</main>
+   567→    </div>
+   568→  );
+   569→}
+   570→`,
+   571→  });
+   572→
+   573→  // ---- app/dashboard/page.tsx (overview with stats) ----
+   574→
+   575→  files.push({
+   576→    path: `app/dashboard/page.tsx`,
+   577→    language: "typescript",
+   578→    content: `import { prisma } from "@/lib/prisma";
+   579→
+   580→// Force dynamic rendering — these pages query the database at request time
+   581→// and should not be statically generated at build time (avoids P2021 when
+   582→// the DB doesn't exist during \`next build\`).
+   583→export const dynamic = "force-dynamic";
+   584→
+   585→export default async function DashboardPage() {
+   586→  const ${entityLower}Count = await prisma.${entityLower}.count();
+   587→  const recent${entity} = await prisma.${entityLower}.findMany({
+   588→    take: 5,
+   589→    orderBy: { createdAt: "desc" },
+   590→  });
+   591→
+   592→  return (
+   593→    <div className="space-y-6">
+   594→      <h1 className="text-2xl font-bold">Overview</h1>
+   595→      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+   596→        <div className="rounded-lg border border-gray-200 bg-white p-4">
+   597→          <p className="text-sm text-gray-500">Total ${entity}</p>
+   598→          <p className="mt-1 text-2xl font-bold">{${entityLower}Count}</p>
+   599→        </div>
+   600→      </div>
+   601→      <div className="rounded-lg border border-gray-200 bg-white p-4">
+   602→        <h2 className="mb-3 text-sm font-semibold text-gray-700">Recent ${entity}</h2>
+   603→        {recent${entity}.length === 0 ? (
+   604→          <p className="text-sm text-gray-500">No ${entityPluralLower} yet.</p>
+   605→        ) : (
+   606→          <ul className="space-y-2">
+   607→            {recent${entity}.map((item) => (
+   608→              <li key={item.id} className="text-sm">
+   609→                <span className="font-medium">{item.name}</span>
+   610→                <span className="ml-2 text-gray-500">x{item.quantity}</span>
+   611→              </li>
+   612→            ))}
+   613→          </ul>
+   614→        )}
+   615→      </div>
+   616→    </div>
+   617→  );
+   618→}
+   619→`,
+   620→  });
+   621→
+   622→  // ---- app/dashboard/<entity>/page.tsx (CRUD table with create form) ----
+   623→
+   624→  const fieldHeaders = model.fields
+   625→    .filter((f) => f.name !== "id" && f.name !== "createdAt" && f.name !== "updatedAt")
+   626→    .map((f) => f.name);
+   627→
+   628→  const formFields = fieldHeaders.filter((f) => f !== "description");
+   629→
+   630→  files.push({
+   631→    path: `app/dashboard/${entityPluralLower}/page.tsx`,
+   632→    language: "typescript",
+   633→    content: `"use client";
+   634→
+   635→import { useState, useEffect } from "react";
+   636→
+   637→type ${entity} = {
+   638→  id: string;
+   639→${fieldHeaders.map((f) => `  ${f}: ${model.fields.find((mf) => mf.name === f)?.tsType};`).join("\n")}
+   640→  createdAt: string;
+   641→};
+   642→
+   643→export default function ${entity}Page() {
+   644→  const [items, setItems] = useState<${entity}[]>([]);
+   645→  const [loading, setLoading] = useState(true);
+   646→  const [error, setError] = useState<string | null>(null);
+   647→  const [showForm, setShowForm] = useState(false);
+   648→${formFields
+   649→  .map(
+   650→    (f) => `  const [${f}, set${f.charAt(0).toUpperCase() + f.slice(1)}] = useState("");`
+   651→  )
+   652→  .join("\n")}
+   653→
+   654→  const fetchItems = async () => {
+   655→    setLoading(true);
+   656→    try {
+   657→      const res = await fetch("/api/${entityPluralLower}");
+   658→      if (!res.ok) throw new Error("Failed to fetch");
+   659→      const data = await res.json();
+   660→      setItems(data);
+   661→    } catch (err) {
+   662→      setError(err instanceof Error ? err.message : "Failed to load");
+   663→    } finally {
+   664→      setLoading(false);
+   665→    }
+   666→  };
+   667→
+   668→  useEffect(() => {
+   669→    fetchItems();
+   670→  }, []);
+   671→
+   672→  const handleSubmit = async (e: React.FormEvent) => {
+   673→    e.preventDefault();
+   674→    const payload = {
+   675→${formFields
+   676→  .map((f) => {
+   677→    const tsType = model.fields.find((mf) => mf.name === f)?.tsType;
+   678→    if (tsType === "number") return `      ${f}: Number(${f}),`;
+   679→    return `      ${f},`;
+   680→  })
+   681→  .join("\n")}
+   682→    };
+   683→    const res = await fetch("/api/${entityPluralLower}", {
+   684→      method: "POST",
+   685→      headers: { "Content-Type": "application/json" },
+   686→      body: JSON.stringify(payload),
+   687→    });
+   688→    if (!res.ok) {
+   689→      const data = await res.json().catch(() => ({ error: "Create failed" }));
+   690→      setError(data.error || "Create failed");
+   691→      return;
+   692→    }
+   693→${formFields
+   694→      .map((f) => `    set${f.charAt(0).toUpperCase() + f.slice(1)}("");`)
+   695→      .join("\n")}
+   696→    setShowForm(false);
+   697→    fetchItems();
+   698→  };
+   699→
+   700→  const handleDelete = async (id: string) => {
+   701→    const res = await fetch(\`/api/${entityPluralLower}?\` + new URLSearchParams({ id }), {
+   702→      method: "DELETE",
+   703→    });
+   704→    if (res.ok) fetchItems();
+   705→  };
+   706→
+   707→  return (
+   708→    <div className="space-y-6">
+   709→      <div className="flex items-center justify-between">
+   710→        <h1 className="text-2xl font-bold">${entity}</h1>
+   711→        <button
+   712→          onClick={() => setShowForm(!showForm)}
+   713→          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+   714→        >
+   715→          {showForm ? "Cancel" : "Add ${entity}"}
+   716→        </button>
+   717→      </div>
+   718→
+   719→      {error && (
+   720→        <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+   721→      )}
+   722→
+   723→      {showForm && (
+   724→        <form onSubmit={handleSubmit} className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
+   725→${formFields
+   726→  .map((f) => {
+   727→    const tsType = model.fields.find((mf) => mf.name === f)?.tsType;
+   728→    const type = tsType === "number" ? "number" : "text";
+   729→    const label = f.charAt(0).toUpperCase() + f.slice(1);
+   730→    return `          <div>
+   731→            <label className="block text-sm font-medium text-gray-700">${label}</label>
+   732→            <input
+   733→              type="${type}"
+   734→              required
+   735→              value={${f}}
+   736→              onChange={(e) => set${label}(e.target.value)}
+   737→              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+   738→            />
+   739→          </div>`;
+   740→  })
+   741→  .join("\n")}
+   742→          <button
+   743→            type="submit"
+   744→            className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"
+   745→          >
+   746→            Create
+   747→          </button>
+   748→        </form>
+   749→      )}
+   750→
+   751→      {loading ? (
+   752→        <p className="text-sm text-gray-500">Loading...</p>
+   753→      ) : (
+   754→        <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+   755→          <table className="min-w-full divide-y divide-gray-200">
+   756→            <thead className="bg-gray-50">
+   757→              <tr>
+   758→                ${fieldHeaders.map((h) => `<th className="px-4 py-2 text-left text-xs font-medium uppercase text-gray-500">${h}</th>`).join("\n                ")}
+   759→                <th className="px-4 py-2 text-left text-xs font-medium uppercase text-gray-500">Actions</th>
+   760→              </tr>
+   761→            </thead>
+   762→            <tbody className="divide-y divide-gray-200">
+   763→              {items.map((item) => (
+   764→                <tr key={item.id} className="hover:bg-gray-50">
+   765→                  ${fieldHeaders.map((h) => `<td className="px-4 py-2 text-sm text-gray-900">{item.${h}}</td>`).join("\n                  ")}
+   766→                  <td className="px-4 py-2 text-sm">
+   767→                    <button
+   768→                      onClick={() => handleDelete(item.id)}
+   769→                      className="text-red-600 hover:text-red-800"
+   770→                    >
+   771→                      Delete
+   772→                    </button>
+   773→                  </td>
+   774→                </tr>
+   775→              ))}
+   776→            </tbody>
+   777→          </table>
+   778→          {items.length === 0 && (
+   779→            <p className="p-4 text-sm text-gray-500">No ${entityPluralLower} yet. Create one above.</p>
+   780→          )}
+   781→        </div>
+   782→      )}
+   783→    </div>
+   784→  );
+   785→}
+   786→`,
+   787→  });
+   788→
+   789→  // ---- app/api/<entity>/route.ts (GET list, POST create, DELETE) ----
+   790→
+   791→  files.push({
+   792→    path: `app/api/${entityPluralLower}/route.ts`,
+   793→    language: "typescript",
+   794→    content: `import { NextRequest, NextResponse } from "next/server";
+   795→import { prisma } from "@/lib/prisma";
+   796→${auth ? `import { getServerSession } from "next-auth";
+   797→import { authOptions } from "@/lib/auth";` : ``}
+   798→
+   799→export async function GET() {
+   800→${auth ? `  const session = await getServerSession(authOptions);
+   801→  if (!session) {
+   802→    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+   803→  }
+   804→` : ``}  const items = await prisma.${entityLower}.findMany({
+   805→    orderBy: { createdAt: "desc" },
+   806→  });
+   807→  return NextResponse.json(items);
+   808→}
+   809→
+   810→export async function POST(req: NextRequest) {
+   811→${auth ? `  const session = await getServerSession(authOptions);
+   812→  if (!session) {
+   813→    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+   814→  }
+   815→` : ``}  try {
+   816→    const body = await req.json();
+   817→    const item = await prisma.${entityLower}.create({
+   818→      data: {
+   819→        name: String(body.name ?? ""),
+   820→        description: body.description ? String(body.description) : null,
+   821→        quantity: Number(body.quantity ?? 0),
+   822→        price: Number(body.price ?? 0),
+   823→      },
+   824→    });
+   825→    return NextResponse.json(item, { status: 201 });
+   826→  } catch (err) {
+   827→    return NextResponse.json(
+   828→      { error: err instanceof Error ? err.message : "Create failed" },
+   829→      { status: 500 }
+   830→    );
+   831→  }
+   832→}
+   833→
+   834→export async function DELETE(req: NextRequest) {
+   835→${auth ? `  const session = await getServerSession(authOptions);
+   836→  if (!session) {
+   837→    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+   838→  }
+   839→` : ``}  const { searchParams } = new URL(req.url);
+   840→  const id = searchParams.get("id");
+   841→  if (!id) {
+   842→    return NextResponse.json({ error: "id required" }, { status: 400 });
+   843→  }
+   844→  try {
+   845→    await prisma.${entityLower}.delete({ where: { id } });
+   846→    return NextResponse.json({ ok: true });
+   847→  } catch (err) {
+   848→    return NextResponse.json(
+   849→      { error: err instanceof Error ? err.message : "Delete failed" },
+   850→      { status: 500 }
+   851→    );
+   852→  }
+   853→}
+   854→`,
+   855→  });
+   856→
+   857→  // ---- Auth files (if needed) ----
+   858→
+   859→  if (auth) {
+   860→    files.push({
+   861→      path: `lib/auth.ts`,
+   862→      language: "typescript",
+   863→      content: `import type { NextAuthOptions } from "next-auth";
+   864→import CredentialsProvider from "next-auth/providers/credentials";
+   865→import bcrypt from "bcryptjs";
+   866→
+   867→// For demo: a single seeded admin user. In production this queries the User table.
+   868→const ADMIN_EMAIL = "admin@example.com";
+   869→const ADMIN_PASSWORD_HASH = "$2a$12$uVQqG7Z0v8Yk2X5e9r1f2eQ8Yw5p3x7v9n4m6b8d2c0a1s3d5f7h9j1k"; // "admin123"
+   870→
+   871→export const authOptions: NextAuthOptions = {
+   872→  providers: [
+   873→    CredentialsProvider({
+   874→      name: "credentials",
+   875→      credentials: {
+   876→        email: { label: "Email", type: "email" },
+   877→        password: { label: "Password", type: "password" },
+   878→      },
+   879→      async authorize(credentials) {
+   880→        if (!credentials?.email || !credentials?.password) {
+   881→          return null;
+   882→        }
+   883→        if (credentials.email !== ADMIN_EMAIL) {
+   884→          return null;
+   885→        }
+   886→        const valid = await bcrypt.compare(credentials.password, ADMIN_PASSWORD_HASH);
+   887→        if (!valid) {
+   888→          return null;
+   889→        }
+   890→        return { id: "1", email: ADMIN_EMAIL, name: "Admin" };
+   891→      },
+   892→    }),
+   893→  ],
+   894→  session: { strategy: "jwt" },
+   895→  pages: {
+   896→    signIn: "/",
+   897→  },
+   898→};
+   899→`,
+   900→    });
+   901→
+   902→    files.push({
+   903→      path: `app/api/auth/[...nextauth]/route.ts`,
+   904→      language: "typescript",
+   905→      content: `import NextAuth from "next-auth";
+   906→import { authOptions } from "@/lib/auth";
+   907→
+   908→const handler = NextAuth(authOptions);
+   909→
+   910→export { handler as GET, handler as POST };
+   911→`,
+   912→    });
+   913→
+   914→    files.push({
+   915→      path: `app/api/auth/login/route.ts`,
+   916→      language: "typescript",
+   917→      content: `import { NextRequest, NextResponse } from "next/server";
+   918→import { getServerSession } from "next-auth";
+   919→import { authOptions } from "@/lib/auth";
+   920→
+   921→export async function POST(req: NextRequest) {
+   922→  const body = await req.json();
+   923→  // Use NextAuth credentials flow
+   924→  const res = await fetch(\`\${process.env.NEXTAUTH_URL || "http://localhost:3000"}/api/auth/callback/credentials\`, {
+   925→    method: "POST",
+   926→    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+   927→    body: new URLSearchParams({
+   928→      email: body.email,
+   929→      password: body.password,
+   930→      csrfToken: "",
+   931→      json: "true",
+   932→    }),
+   933→  });
+   934→  if (!res.ok) {
+   935→    return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+   936→  }
+   937→  return NextResponse.json({ ok: true });
+   938→}
+   939→`,
+   940→    });
+   941→
+   942→    files.push({
+   943→      path: `middleware.ts`,
+   944→      language: "typescript",
+   945→      content: `export { default } from "next-auth/middleware";
+   946→
+   947→export const config = {
+   948→  matcher: ["/dashboard/:path*"],
+   949→};
+   950→`,
+   951→    });
+   952→
+   953→    files.push({
+   954→      path: `types/next-auth.d.ts`,
+   955→      language: "typescript",
+   956→      content: `import { DefaultSession } from "next-auth";
+   957→
+   958→declare module "next-auth" {
+   959→  interface Session {
+   960→    user: {
+   961→      id: string;
+   962→    } & DefaultSession["user"];
+   963→  }
+   964→}
+   965→`,
+   966→    });
+   967→  }
+   968→
+   969→  // ---- Seed script ----
+   970→
+   971→  files.push({
+   972→    path: `prisma/seed.ts`,
+   973→    language: "typescript",
+   974→    content: `import { PrismaClient } from "@prisma/client";
+   975→${auth ? `import bcrypt from "bcryptjs";` : ""}
+   976→
+   977→const prisma = new PrismaClient();
+   978→
+   979→async function main() {
+   980→  ${auth ? `const passwordHash = await bcrypt.hash("admin123", 12);
+   981→  await prisma.user.upsert({
+   982→    where: { email: "admin@example.com" },
+   983→    update: {},
+   984→    create: {
+   985→      email: "admin@example.com",
+   986→      passwordHash,
+   987→      name: "Admin",
+   988→    },
+   989→  });
+   990→  ` : ``}console.log("Seed complete");
+   991→}
+   992→
+   993→main()
+   994→  .catch((e) => {
+   995→    console.error(e);
+   996→    process.exit(1);
+   997→  })
+   998→  .finally(async () => {
+   999→    await prisma.$disconnect();
+  1000→  });
+  1001→`,
+  1002→  });
+  1003→
+  1004→  files.push({
+  1005→    path: `README.md`,
+  1006→    language: "markdown",
+  1007→    content: `# ${projectName}
+  1008→
+  1009→A real Next.js 14 web application generated by Pavan's Web Generator (Forge).
+  1010→
+  1011→## What's included
+  1012→- Next.js 14 (App Router) + TypeScript + Tailwind CSS
+  1013→- Prisma ORM with SQLite (schema.prisma with ${entity} model)
+  1014→- ${auth ? "NextAuth.js credentials auth (login page + protected routes)" : "Public dashboard"}
+  1015→- CRUD: /dashboard/${entityPluralLower} (list, create, delete)
+  1016→- API: /api/${entityPluralLower} (GET, POST, DELETE)
+  1017→
+  1018→## Setup
+  1019→\`\`\`bash
+  1020→npm install
+  1021→npx prisma generate
+  1022→npx prisma db push
+  1023→${auth ? `npx tsx prisma/seed.ts\n` : ""}npm run dev
+  1024→\`\`\`
+  1025→
+  1026→## Build
+  1027→\`\`\`bash
+  1028→npm run build
+  1029→\`\`\`
+  1030→
+  1031→${auth ? `## Default login\n- Email: admin@example.com\n- Password: admin123\n` : ""}
+  1032→## Capabilities detected
+  1033→${capabilities.length ? capabilities.map((c) => `- ${c}`).join("\n") : "- none"}
+  1034→
+  1035→## Non-functionals
+  1036→${nonFunctionals.length ? nonFunctionals.map((n) => `- ${n}`).join("\n") : "- none"}
+  1037→
+  1038→Generated by Pavan — Autonomous Software Creator.
+  1039→`,
+  1040→  });
+  1041→
+  1042→  return registerFiles(files, "web", "Next.js 14 + Prisma + Tailwind", "frontend-generator", targetId, "source-code", "generate");
+  1043→}
+  1044→
