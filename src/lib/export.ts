@@ -7,7 +7,7 @@
 
 import type { ProjectMeta, ProjectKind } from "./types";
 import type { PlatformKind } from "./engine/types";
-import { artifactRegistry, projectMemory, registries, generateForTarget, detectCapabilities, detectNonFunctionals } from "./engine";
+import { artifactRegistry, projectMemory, registries, generateForTarget, detectCapabilities, detectNonFunctionals } from "./engine/client";
 
 export interface ExportResult {
   ok: boolean;
