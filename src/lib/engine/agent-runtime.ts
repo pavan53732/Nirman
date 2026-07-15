@@ -36,7 +36,7 @@ import type {
 import { agents } from "./data/agents";
 import { getAgentHandler } from "./agent-handlers";
 import { sharedContext } from "./shared-context";
-import { contextBuilder, projectMemory } from "./memories";
+import { contextBuilder, memoryAccess } from "./memories";
 
 /* ---------------- Agent metadata (sourced from data/agents.ts) ---------------- */
 
@@ -248,7 +248,7 @@ export class AgentRuntime {
   //   2. Building the AgentExecutionContext (memory slice + skills + shared
   //      context + spawnSubAgent + emit)
   //   3. Executing the handler
-  //   4. Persisting the result's memoryWrites to projectMemory
+  //   4. Persisting the result's memoryWrites to memoryAccess (facade over projectMemory)
   //   5. Persisting the result's sharedWrites to the SharedContext blackboard
   //   6. Returning the result (with durationMs filled in)
   //
@@ -324,13 +324,18 @@ export class AgentRuntime {
       const result: AgentExecutionResult = await handler(ctx);
       result.durationMs = Date.now() - start;
 
-      // Persist memory writes. The handler declares WHAT to write (kind,
-      // title, content); the runtime commits it with the agent role as the
-      // source — keeping memory attribution honest (the runtime is the only
-      // thing that mutates project memory).
+      // Persist memory writes via the official MemoryAccess facade.
+      // The handler declares WHAT to write (kind, title, content); the
+      // runtime commits it with the agent role as the source — keeping
+      // memory attribution honest (the runtime is the only thing that
+      // mutates project memory). Each write is recorded in
+      // `memoryAccess.getAccessLog()` for the audit trail.
+      //
+      // (Runtime V2 Audit, Phase 2 Step 6: internal modules must not
+      // touch `projectMemory` directly — they go through `memoryAccess`.)
       if (result.memoryWrites) {
         for (const w of result.memoryWrites) {
-          projectMemory.write(w.kind, w.title, w.content, task.agent);
+          memoryAccess.write(w.kind, w.title, w.content, task.agent);
         }
       }
 

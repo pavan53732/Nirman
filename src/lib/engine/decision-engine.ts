@@ -13,7 +13,7 @@ import type {
   PlatformKind,
 } from "./types";
 import { decisionPolicies } from "./data/workflows";
-import { projectMemory } from "./memories";
+import { memoryAccess } from "./memories";
 
 export interface DetectedTargets {
   kind: PlatformKind;
@@ -259,8 +259,11 @@ export class DecisionEngine {
       createdAt: Date.now(),
     };
 
-    // Log to Decision Memory (versioned)
-    projectMemory.write(
+    // Log to Decision Memory (versioned) via the official MemoryAccess
+    // facade. Direct `projectMemory` access is deprecated for internal
+    // modules (Runtime V2 Audit, Phase 2 Step 6) — this write will appear
+    // in `memoryAccess.getAccessLog()` with source="decision-engine".
+    memoryAccess.write(
       "decision",
       opts.topic,
       JSON.stringify(

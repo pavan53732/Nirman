@@ -1,51 +1,34 @@
-// Orchestrator — the conductor. Wires the 5 executive agents and all
-// subsystems: registries, provider abstraction, execution engine, workflow
-// engine, memories, artifact registry, decision engine, self-healing,
-// checkpoints, and observability.
+// Orchestrator — the conductor. THIN since Wave 2A: only coordination + I/O.
+//
+// Business logic (capability/ambiguity/target detection, task graph build) is
+// DELEGATED to the WorkflowEngine. The orchestrator owns: memory writes,
+// SharedContext publication, the generation/materialization loop, workspace
+// disk I/O, gate task annotation, token budgeting, and engine lifecycle.
 //
 // The 5 Executive agents (always active):
-//   - Orchestrator Agent       -> this class (drives the pipeline)
-//   - Project Manager Agent    -> tracks project state & milestones
-//   - Planner Agent            -> decomposes requirements into a plan
-//   - Decision Engine Agent    -> applies policies, logs decisions
-//   - Context Builder Agent    -> minimal prompt packs per agent
+//   Orchestrator · Project Manager · Planner · Decision Engine · Context Builder
 
 import type {
-  Workflow,
-  WorkflowId,
-  Task,
-  EngineEvent,
-  StageId,
-  DecisionRecord,
-  Capability,
-  PlatformKind,
-  AgentRole,
-  GateId,
+  Workflow, WorkflowId, Task, EngineEvent, StageId,
+  DecisionRecord, Capability, AgentRole, GateId,
 } from "./types";
 import { executionEngine, checkpointManager, makeTask } from "./execution-engine";
-import { workflowEngine } from "./workflow-engine";
-import { projectMemory, contextBuilder } from "./memories";
+import { workflowEngine, detectTargets, readDatabaseFromMemory, promptToName, type PromptAnalysis } from "./workflow-engine";
+import { projectMemory } from "./memories";
 import { artifactRegistry } from "./artifact-registry";
-import { decisionEngine, detectCapabilities, detectNonFunctionals, type DetectedTargets } from "./decision-engine";
+import { detectNonFunctionals, type DetectedTargets } from "./decision-engine";
 import { observability } from "./observability";
 import { selfHealController } from "./self-healing";
-import { registries } from "./registries";
 import { tokenBudgetManager } from "./provider-abstraction";
-import { generateForTarget, type DatabaseChoice } from "./generators";
-import { askQuestionIfNeeded, detectAmbiguity, AMBIGUITY_THRESHOLD } from "./skills/ambiguity-detector";
+import { generateForTarget } from "./generators";
 import { agentRuntime, initAgentRuntime } from "./agent-runtime";
-// SharedContext (Task I) — the inter-agent blackboard. The orchestrator
-// writes the initial build context here at startBuild() so downstream
-// agents (Architect → Generators → Reviewer → Builder) can read it instead
-// of receiving it via direct calls. See ./shared-context.ts for the
-// key-naming convention.
-import { sharedContext } from "./shared-context";
+import { sharedContext } from "./shared-context"; // inter-agent blackboard (Task I)
+import { taskGraph } from "./task-graph"; // mutable DAG (Wave 1A)
 
 // Debounced trace sync — POSTs the client-side executionEngine trace + agent
-// activations to the server so /api/build/trace and /api/agents/trace return
-// real data after a client-side build. The orchestrator runs in the browser
-// (Zustand store), so without this sync the server-side trace endpoints would
-// always return empty.
+// activations to /api/build/trace + /api/agents/trace so the debug endpoints
+// return real data after a client-side build (the orchestrator runs in the
+// browser via the Zustand store).
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleTraceSync(): void {
   if (typeof window === "undefined") return; // SSR guard
@@ -84,72 +67,10 @@ export interface OrchestrationResult {
   pendingQuestion: string | null;
 }
 
-/** Detect generation targets (multi-target) from a prompt. */
-export function detectTargets(prompt: string): DetectedTargets[] {
-  const caps = detectCapabilities(prompt);
-  const nfs = detectNonFunctionals(prompt);
-  const p = " " + prompt.toLowerCase() + " ";
-  const out: DetectedTargets[] = [];
-  const wants = (re: RegExp) => re.test(p);
-
-  // Domain inference: if the prompt mentions CAD/3D/GPU/game but no explicit
-  // platform keyword, infer windows/native (not the default web). This prevents
-  // "Build CAD software" from falling through to a generic Next.js app.
-  const isCAD = /\b(cad|autocad|3d modeling|opengl|directx|vulkan|rendering)\b/.test(p);
-  const isGame = /\b(game|unity|godot|2d platformer|3d game)\b/.test(p);
-  const domainInferredWindows = isCAD && !wants(/\b(web|android|cli|api)\b/);
-  const domainInferredGame = isGame && !wants(/\b(web|windows|android|cli|api)\b/);
-
-  const multi =
-    [
-      wants(/\b(windows|desktop|winui|wpf|winforms|win32)\b/) || domainInferredWindows,
-      wants(/\b(android|mobile( app)?|kotlin|flutter|companion app|phone app)\b/),
-      wants(/\b(web( site| app| admin| portal)?|website|landing|marketing site|saas|portal)\b/),
-      wants(/\b(api|rest|backend service|microservice)\b/),
-      wants(/\b(cli|command.line|terminal tool)\b/),
-    ].filter(Boolean).length > 1;
-
-  if (wants(/\b(windows|desktop|winui|wpf|winforms|win32|\.net\s*(desktop|app))\b/) || domainInferredWindows) {
-    const kind = "windows" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
-    out.push({ kind, label: multi ? "Desktop App" : "App", role: multi ? "Primary desktop workspace" : "Windows desktop application", stack, capabilities: caps, policies: [decision] });
-  }
-  if (wants(/\b(android|mobile( app)?|kotlin|flutter|companion app|phone app)\b/)) {
-    const kind = "android" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
-    out.push({ kind, label: multi ? "Android Companion" : "App", role: multi ? "Mobile companion app" : "Android application", stack, capabilities: caps, policies: [decision] });
-  }
-  if (wants(/\b(web( site| app| admin| portal)?|website|landing|marketing site|saas|portal|browser)\b/)) {
-    const kind = "web" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
-    out.push({ kind, label: multi ? "Web Portal" : "App", role: multi ? "Web admin portal" : "Web application", stack, capabilities: caps, policies: [decision] });
-  }
-  if (wants(/\b(api|rest( api)?|graphql|backend service|microservice)\b/)) {
-    const kind = "api" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
-    out.push({ kind, label: "API Service", role: "Backend API and data layer", stack, capabilities: caps, policies: [decision] });
-  }
-  if (wants(/\b(cli|command.line|terminal tool|brew install|cargo install)\b/)) {
-    const kind = "cli" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
-    out.push({ kind, label: "CLI Tool", role: "Command-line utility", stack, capabilities: caps, policies: [decision] });
-  }
-  if (wants(/\b(ai agent|autonomous agent|assistant service|chatbot|support agent)\b/)) {
-    out.push({ kind: "api" as PlatformKind, label: "AI Agent", role: "Autonomous agent service", stack: "Python + LangGraph", capabilities: caps, policies: [decisionEngine.pickStack("api", prompt, caps, nfs).decision] });
-  }
-  if (wants(/\b(library|sdk|npm package|crate)\b/)) {
-    out.push({ kind: "library" as PlatformKind, label: "Library", role: "Reusable library / SDK", stack: /\b(rust|crate)\b/.test(p) ? "Rust crate" : "TypeScript library", capabilities: caps, policies: [] });
-  }
-  if (domainInferredGame) {
-    out.push({ kind: "library" as PlatformKind, label: "Game", role: "Interactive game", stack: "Godot + GDScript", capabilities: caps, policies: [] });
-  }
-  if (out.length === 0) {
-    const kind = "web" as PlatformKind;
-    const { stack, decision } = decisionEngine.pickStack(kind, prompt, caps, nfs);
-    out.push({ kind, label: "Web App", role: "Web application", stack, capabilities: caps, policies: [decision] });
-  }
-  return out;
-}
+// Re-export the helpers that moved to the workflow engine in Wave 2A so
+// existing imports from "./orchestrator" (failure-tests.ts, perf-harness.ts,
+// index.ts) keep working. Their definitions live in workflow-engine.ts.
+export { detectTargets, readDatabaseFromMemory };
 
 export class Orchestrator {
   /** Bootstrap: register all data into registries and wire the event bus. */
@@ -166,21 +87,23 @@ export class Orchestrator {
     });
   }
 
-  /**
-   * Run a build: select workflow, detect targets + capabilities, write
-   * requirements/decision memory, compile the workflow DAG, submit to the
-   * execution engine, and return the plan.
-   */
+  /** Run a build. THIN orchestrator (Wave 2A): analysis + task-graph build
+   *  are DELEGATED to workflowEngine; memory/shared-context writes, generation
+   *  loop, workspace materialization, gate annotation, token budgeting, and
+   *  engine lifecycle stay here as coordination. Signature + return type +
+   *  behavior are IDENTICAL to pre-Wave-2A. */
   async startBuild(prompt: string, projectId?: string): Promise<OrchestrationResult & { tasks: Task[] }> {
+    // 1. Reset all subsystems.
     executionEngine.reset();
     checkpointManager.clear();
     artifactRegistry.clear();
+    taskGraph.clear();
+    sharedContext.clear();
 
-    // Context Builder pulls relevant memory for the planner
-    const ctx = contextBuilder.buildForAgent("planner", { kinds: ["requirements", "decision", "conversation"], prompt });
+    // 2. Analyze the prompt (capability + ambiguity + target detection, db read).
+    const analysis: PromptAnalysis = workflowEngine.analyzePrompt(prompt);
+    const { capabilities, targets, decisions, database } = analysis;
 
-    // Capability Detection (runs first)
-    const capabilities = detectCapabilities(prompt);
     observability.recordEvent({
       id: `ev-${Date.now()}`,
       ts: Date.now(),
@@ -188,41 +111,42 @@ export class Orchestrator {
       message: `Detected capabilities: ${capabilities.join(", ") || "none"}`,
       level: "info",
     });
-
-    // Autonomy gate: Ambiguity Detection. If the requirement is too ambiguous
-    // (score > AMBIGUITY_THRESHOLD), emit a human-question and pause the
-    // workflow instead of inventing business requirements. The engine asks
-    // ONLY when information is missing, conflicting, or an external resource
-    // is needed without credentials.
-    const ambiguity = detectAmbiguity(prompt);
     observability.recordEvent({
       id: `ev-${Date.now()}-amb`,
       ts: Date.now(),
       type: "capability-detected",
-      message: `Ambiguity score ${ambiguity.score.toFixed(2)} (threshold ${AMBIGUITY_THRESHOLD})${ambiguity.shouldAsk ? " → asking user" : " → proceeding autonomously"}`,
-      level: ambiguity.shouldAsk ? "warn" : "info",
+      message: `Ambiguity score ${analysis.ambiguityScore.toFixed(2)} (threshold 0.75)${analysis.pendingQuestion ? " → asking user" : " → proceeding autonomously"}`,
+      level: analysis.pendingQuestion ? "warn" : "info",
     });
-    const pendingQuestion = askQuestionIfNeeded(prompt);
 
-    // Detect multi-targets + decisions
-    const targets = detectTargets(prompt);
-    const decisions = targets.flatMap((t) => t.policies);
+    // 3. Select a workflow.
+    const workflow = workflowEngine.select(prompt);
+    observability.recordEvent({
+      id: `ev-${Date.now()}-wf`,
+      ts: Date.now(),
+      type: "workflow-selected",
+      workflowId: workflow.id,
+      message: `Selected workflow: ${workflow.name}`,
+      level: "info",
+    });
 
-    // Write Requirements Memory + Decision Memory
+    // 4. Write Requirements + Decision + Architecture memory.
     projectMemory.write("requirements", "Original Prompt", prompt, "user");
-    projectMemory.write("requirements", "Detected Targets", targets.map((t) => `${t.label}: ${t.stack} (${t.role})`).join("\n"), "decision-engine");
-    projectMemory.write("decision", "Stack Selection", decisions.map((d) => `${d.topic}: ${d.chosen} (${d.confidence})`).join("\n"), "decision-engine");
+    projectMemory.write(
+      "requirements",
+      "Detected Targets",
+      targets.map((t) => `${t.label}: ${t.stack} (${t.role})`).join("\n"),
+      "decision-engine"
+    );
+    projectMemory.write(
+      "decision",
+      "Stack Selection",
+      decisions.map((d) => `${d.topic}: ${d.chosen} (${d.confidence})`).join("\n"),
+      "decision-engine"
+    );
     projectMemory.write("architecture", "Capabilities", capabilities.join(", ") || "none", "decision-engine");
-
-    // ---- READ Architecture Memory: database choice drives generator output ----
-    // The user (or a future LLM agent) may write "Database: PostgreSQL" to
-    // Architecture Memory. Generators branch on this — Prisma provider, EF Core
-    // provider, Android persistence note. Reading memory HERE proves memory has
-    // real impact on generated output (see /api/debug/memory-impact).
-    const database = readDatabaseFromMemory();
     if (database !== "sqlite") {
-      // Surface the parsed choice in Decision Memory so the UI + downstream
-      // agents can see that the database was overridden by Architecture Memory.
+      // Surface the architecture-memory database override in Decision Memory.
       projectMemory.write(
         "decision",
         "Database Choice (from Architecture Memory)",
@@ -231,18 +155,8 @@ export class Orchestrator {
       );
     }
 
-    // ---- SharedContext: fresh blackboard + initial context writes ----------
-    // Clear any stale entries from a previous build, then publish the key
-    // context every downstream agent will read. Agents no longer receive
-    // this via direct calls — they read it from the shared blackboard:
-    //   Planner   reads "prompt" + "capabilities"
-    //   Architect reads "plan" + "targets" + "decisions"
-    //   Generator reads "architecture" + "targets[i]"
-    //   Reviewer  reads "code:<target>"
-    //   Builder   reads "review:<target>"
-    // Keys written here are the build's initial inputs; per-agent outputs
-    // are written by the agents themselves (Task I handlers).
-    sharedContext.clear();
+    // 5. Publish the analysis to the SharedContext blackboard. Downstream
+    //    agents (Planner, Architect, Generator, Reviewer, Builder) read these.
     sharedContext.write("prompt", prompt);
     sharedContext.write("targets", targets);
     sharedContext.write("capabilities", capabilities);
@@ -257,24 +171,9 @@ export class Orchestrator {
       level: "debug",
     });
 
-    // Workflow selection
-    const workflow = workflowEngine.select(prompt);
-    observability.recordEvent({
-      id: `ev-${Date.now()}-wf`,
-      ts: Date.now(),
-      type: "workflow-selected",
-      workflowId: workflow.id,
-      message: `Selected workflow: ${workflow.name}`,
-      level: "info",
-    });
-
-    // ---- Real generation: invoke the generator for each detected target ----
-    // The Desktop Generator (Anvil) produces WinUI 3 / Tauri scaffolding; the
-    // Android Generator (Droid) produces Kotlin+Compose / Flutter; the Web
-    // Generator (Forge) produces a REAL compilable Next.js app (Prisma + auth
-    // + CRUD pages derived from the requirement's data model). Files are
-    // versioned into the Artifact Registry and emitted as artifact-produced
-    // events for observability.
+    // 6. Generation loop — materialize files per detected target. (In a future
+    //    wave this moves into agent handlers; for now the orchestrator owns the
+    //    materialization I/O.)
     const generationResults = targets.map((t, i) => {
       const result = generateForTarget(t.kind, t.stack, promptToName(prompt) || `App${i + 1}`, `t${i + 1}`, {
         prompt,
@@ -300,121 +199,29 @@ export class Orchestrator {
     });
     const totalFiles = generationResults.reduce((n, g) => n + g.files.length, 0);
 
-    // Publish per-target generation outputs to the SharedContext blackboard
-    // (key convention: "code:<target>"). Downstream agents (Reviewer, Builder)
-    // read these instead of receiving them via direct calls. The direct
-    // generation above is the backward-compat fallback; when Task I's
-    // handlers are wired, the per-target generation tasks below will produce
-    // these same keys via AgentExecutionResult.sharedWrites.
+    // Publish per-target code to SharedContext (key: "code:<kind>").
     for (let i = 0; i < targets.length; i++) {
-      const t = targets[i];
-      const g = generationResults[i];
-      sharedContext.write(`code:${t.kind}`, g.files);
+      sharedContext.write(`code:${targets[i].kind}`, generationResults[i].files);
     }
     sharedContext.write("generatedFilesCount", totalFiles);
 
-    // Compile DAG
-    const tasks = workflowEngine.compile(workflow, workflow.stages.map((s) => s.id as StageId));
-
-    // ---- Parallel per-target generation tasks ------------------------------
-    // The compiled DAG has a SINGLE "generate" stage task. We augment it
-    // with one "Generating (<target>)" task per detected target. These
-    // tasks all depend on the SAME architecture predecessors (the architect
-    // stage task + architect gate) and have NO dependencies on each other →
-    // the ExecutionEngine dispatches them in the SAME parallelBatch
-    // (maxParallel=4), proving true parallel scheduling in /api/build/trace.
-    //
-    // Agent attribution uses the kind-appropriate generator so the agent
-    // trace shows the right specialist per target (Forge=web, Anvil=desktop,
-    // Droid=android, etc.).
-    //
-    // Each task carries the target spec in its description (JSON-encoded)
-    // so the AgentRuntime handler (Task I) can read it and call
-    // generateForTarget with the right arguments. Until Task I's executor
-    // is wired, these tasks complete as no-ops — the real generation
-    // already ran above (backward-compat fallback) and the workspace is
-    // already materialized below.
-    const generateStageTask = tasks.find((t) => t.stageId === "generate" && !t.gate);
-    // The generate stage task's dependsOn are the architect stage task +
-    // architect gate — i.e. the architecture predecessors. The per-target
-    // gen tasks share these so they become ready in the SAME scheduler
-    // tick as the generate stage task → same parallelBatch.
-    let archDeps: string[] = generateStageTask?.dependsOn ?? [];
-    if (archDeps.length === 0) {
-      // Fallback for workflows without an explicit generate stage task:
-      // depend on the architect gate (or architect stage task) directly.
-      const archGate = tasks.find((t) => t.stageId === "architect" && t.gate === "architecture");
-      const archStage = tasks.find((t) => t.stageId === "architect" && !t.gate);
-      archDeps = archGate?.id ? [archGate.id] : archStage?.id ? [archStage.id] : [];
-    }
-
-    // Map each platform kind to its specialist generator agent.
-    const targetAgent: Partial<Record<PlatformKind, AgentRole>> = {
-      windows: "desktop-generator",
-      android: "android-generator",
-      web: "frontend-generator",
-      api: "backend-generator",
-      cli: "backend-generator",
-      library: "backend-generator",
-    };
-
-    const perTargetGenTasks: Task[] = targets.map((t, i) => {
-      const targetId = `t${i + 1}`;
-      const name = promptToName(prompt) || `App${i + 1}`;
-      const task = makeTask({
-        workflowId: workflow.id,
-        stageId: "generate",
-        title: `Generating (${t.label})`,
-        description: JSON.stringify({
-          kind: t.kind,
-          stack: t.stack,
-          name,
-          targetId,
-          label: t.label,
-          role: t.role,
-          capabilities: t.capabilities,
-          database,
-        }),
-        agent: targetAgent[t.kind] ?? "frontend-generator",
-        dependsOn: [...archDeps], // copy — same as generate stage task → parallel
-      });
-      return task;
-    });
-
-    // Insert the per-target tasks right after the generate stage task so the
-    // trace's scheduledAt ordering is stable + readable. If no generate stage
-    // task exists, append them at the end.
-    if (generateStageTask) {
-      const idx = tasks.indexOf(generateStageTask);
-      tasks.splice(idx + 1, 0, ...perTargetGenTasks);
-    } else {
-      tasks.push(...perTargetGenTasks);
-    }
-
-    // Extend the generate stage's compilation gate to also depend on the
-    // per-target tasks — otherwise the gate would fire as soon as the
-    // (no-op) generate stage task completes, racing the parallel tasks.
-    // Now the gate waits for ALL parallel generation tasks to finish.
-    for (const t of tasks) {
-      if (t.stageId === "generate" && t.gate === "compilation") {
-        for (const pt of perTargetGenTasks) {
-          if (!t.dependsOn.includes(pt.id)) t.dependsOn.push(pt.id);
-        }
-      }
-    }
-
+    // 7. Build the task DAG — compile workflow + add per-target parallel gen
+    //    tasks + extend generate stage's compilation gate deps. (DELEGATED.)
+    const tasks = workflowEngine.buildTaskGraph(workflow, analysis, prompt);
     observability.recordEvent({
       id: `ev-${Date.now()}-par-gen`,
       ts: Date.now(),
       type: "task-queued",
       stageId: "generate",
-      message: `Created ${perTargetGenTasks.length} parallel generation tasks (dependsOn arch: [${archDeps.join(", ")}])`,
+      message: `Created ${targets.length} parallel generation tasks`,
       level: "info",
     });
 
-    // Materialize generated files to a real on-disk workspace so the
-    // compilation gate can run `tsc --noEmit` against them. Attach the
-    // workspace path to the compilation gate task + the build stage task.
+    // 8. Populate the TaskGraph (Wave 1A) — the mutable DAG observers query.
+    taskGraph.addAll(tasks);
+
+    // 9. Materialize generated files to disk so the compilation gate can run
+    //    `tsc --noEmit` against them.
     const wsProjectId = projectId ?? `proj-${Date.now()}`;
     const workspacePaths: Record<string, string> = {}; // targetId -> path
     for (let i = 0; i < targets.length; i++) {
@@ -443,25 +250,19 @@ export class Orchestrator {
         // workspace write is best-effort; gates will skip if no workspace
       }
     }
-    // Publish per-target workspace paths to the SharedContext blackboard.
-    // Downstream build/review agents read "workspace:<target>" to find the
-    // on-disk location of each target's materialized files.
+    // Publish per-target workspace paths to SharedContext ("workspace:<kind>").
     sharedContext.write("workspaces", workspacePaths);
     for (let i = 0; i < targets.length; i++) {
       const ws = workspacePaths[`t${i + 1}`];
       if (ws) sharedContext.write(`workspace:${targets[i].kind}`, ws);
     }
 
-    // Annotate the compilation gate task with the web workspace (runs tsc).
-    // For multi-target builds, attach the primary target's workspace + type.
-    // Desktop/android static validation happens via their own gate tasks below.
+    // 10. Annotate gate tasks with workspacePath + targetType + artifactCount.
+    //     Compilation gates run `tsc` (web) or static validators (desktop/android).
     const webWorkspace = workspacePaths["t1"] ?? Object.values(workspacePaths)[0] ?? undefined;
     const primaryTarget = targets[0];
     const primaryType = primaryTarget?.kind === "windows" ? "desktop" : primaryTarget?.kind === "android" ? "android" : "web";
     for (const task of tasks) {
-      // Set gateContext for ALL gate tasks. Structural gates (architecture,
-      // security, etc.) need artifactCount to pass. Compilation gates need
-      // workspacePath + targetType.
       if (task.gate) {
         (task as Task & { gateContext?: import("./self-healing").GateEvaluationContext }).gateContext = {
           workspacePath: webWorkspace,
@@ -469,21 +270,21 @@ export class Orchestrator {
           targetType: task.gate === "compilation" ? primaryType : undefined,
         };
       }
-      // Attach toolId + cwd to the build stage task so it runs npm-build (web only)
+      // Attach toolId + cwd to the build stage task so it runs npm-build (web only).
       if (task.stageId === "build" && !task.gate && webWorkspace && primaryTarget?.kind === "web") {
         task.toolId = "npm-build";
         (task as Task & { args?: { cwd?: string } }).args = { cwd: webWorkspace };
       }
     }
 
-    // For multi-target builds, add per-target compilation gate tasks for
-    // desktop/android so their static validators run too.
+    // 11. Add per-target compilation gates for non-primary desktop/android
+    //     targets so their static validators run too.
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i];
       const wsPath = workspacePaths[`t${i + 1}`];
       if (!wsPath) continue;
       const tType = t.kind === "windows" ? "desktop" : t.kind === "android" ? "android" : null;
-      if (!tType || tType === primaryType) continue; // skip, already covered
+      if (!tType || tType === primaryType) continue; // skip — primary target already covered
       const extraGate = makeTask({
         workflowId: workflow.id,
         stageId: "build",
@@ -499,9 +300,11 @@ export class Orchestrator {
         targetType: tType as "desktop" | "android",
       };
       tasks.push(extraGate);
+      taskGraph.add(extraGate);
     }
 
-    // Token budget check
+    // 12. Token budget. Real tokens come from /api/chat usage; non-LLM tasks
+    //     (planner context, generator file production) charge 0.
     if (!tokenBudgetManager.withinBudget("planner", workflow.id)) {
       observability.recordEvent({
         id: `ev-${Date.now()}-budget`,
@@ -511,28 +314,19 @@ export class Orchestrator {
         level: "error",
       });
     }
-    // Token charging: real tokens come from the z-ai SDK chat response
-    // (captured in use-chat.ts via usage.total_tokens). For non-LLM tasks
-    // (planner context, generator file production), tokens = 0 — no estimate.
-    // The ctx.tokenEstimate is NOT charged — it was only used for budget
-    // checking, not for observability metrics.
     tokenBudgetManager.charge("planner", workflow.id, 0);
-    // Generator agents produce files via deterministic templates, not LLM
-    // calls — no tokens consumed. Real tokens are only from /api/chat.
     for (const g of generationResults) {
       observability.chargeTokens(g.producedBy, 0, workflow.id);
       tokenBudgetManager.charge(g.producedBy, workflow.id, 0);
     }
 
-    // Submit to execution engine (parallel, dependency-scheduled). If the
-    // ambiguity gate raised a question, askQuestionIfNeeded already cancelled
-    // running tasks; we still return the plan so the UI can surface the question.
+    // 13. Submit to execution engine. If the autonomy gate raised a question,
+    //     cancel anything that just started so the engine waits for the user's
+    //     clarification before resuming.
     executionEngine.submitAll(tasks);
-    if (pendingQuestion) {
-      // Pause: cancel anything that just started so the engine waits for the
-      // user's clarification before resuming.
+    if (analysis.pendingQuestion) {
       executionEngine.cancelAll();
-      projectMemory.write("requirements", "Pending Question", pendingQuestion, "ambiguity-detector");
+      projectMemory.write("requirements", "Pending Question", analysis.pendingQuestion, "ambiguity-detector");
     }
 
     return {
@@ -542,8 +336,8 @@ export class Orchestrator {
       capabilities,
       tasks,
       generatedFiles: totalFiles,
-      ambiguityScore: ambiguity.score,
-      pendingQuestion,
+      ambiguityScore: analysis.ambiguityScore,
+      pendingQuestion: analysis.pendingQuestion,
     };
   }
 
@@ -587,67 +381,3 @@ export class Orchestrator {
 }
 
 export const orchestrator = new Orchestrator();
-
-/**
- * Read the configured database choice from Architecture Memory.
- *
- * Generators must branch on the database selected for the project (e.g.
- * SQLite for offline-first vs PostgreSQL for client/server). Architecture
- * Memory is the source of truth — when an LLM agent (or the user) writes
- * "Database: PostgreSQL" there, every subsequent generator run should emit
- * the PostgreSQL flavor of the Prisma schema / EF Core provider / Android
- * note. This helper reads memory and parses the choice.
- *
- * Order matters: PostgreSQL is checked first so a record that says
- * "Database: PostgreSQL" wins even if older records mentioned SQLite.
- * Defaults to "sqlite" when memory is empty or no database record exists.
- *
- * Records are matched on lowercased `content`; the title is ignored so the
- * helper works with any naming convention (e.g. "Database", "Database Choice",
- * "Storage", etc.). Both `database: postgres` and bare `postgresql` match.
- */
-export function readDatabaseFromMemory(): DatabaseChoice {
-  const records = projectMemory.read("architecture");
-  // Scan newest-first so the latest database decision wins.
-  for (const r of [...records].sort((a, b) => b.createdAt - a.createdAt)) {
-    const content = r.content.toLowerCase();
-    if (/database\s*[:=]?\s*postgres/.test(content) || /\bpostgresql\b/.test(content)) {
-      return "postgresql";
-    }
-    if (/database\s*[:=]?\s*sqlite/.test(content) || /\bsqlite\b/.test(content)) {
-      return "sqlite";
-    }
-  }
-  return "sqlite"; // default — matches the existing offline-first behavior
-}
-
-/** Derive a clean project name from the prompt (shared with the store). */
-function promptToName(prompt: string): string {
-  let trimmed = prompt.trim().toLowerCase();
-  let prev = "";
-  while (prev !== trimmed) {
-    prev = trimmed;
-    trimmed = trimmed.replace(
-      /^(build|build me|create|make|generate|develop|i want|i need|please|a|an|the|me|some)\s+/i,
-      ""
-    );
-  }
-  const stopwords = new Set([
-    "in", "that", "with", "for", "to", "and", "of", "on", "using", "via",
-    "which", "from", "into", "where", "when", "app", "application", "as",
-    "companion", "portal", "admin", "me",
-  ]);
-  const acronyms = new Set(["cli", "ai", "api", "sdk", "saas", "ui", "ux", "ios", "ml", "crm", "cms", "erp", "hrm"]);
-  const words: string[] = [];
-  for (const w of trimmed.split(/\s+/).filter(Boolean)) {
-    if (stopwords.has(w)) break;
-    words.push(w);
-    if (words.length >= 3) break;
-  }
-  if (words.length === 0) return "App";
-  return words
-    .map((w) => (acronyms.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
-    .join(" ")
-    .replace(/[^a-zA-Z0-9 ]/g, "")
-    .trim();
-}

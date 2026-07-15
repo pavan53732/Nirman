@@ -33,7 +33,7 @@
 // convenience for the current session; long-term persistence is the
 // caller's responsibility (see the debug endpoint for an example flow).
 
-import { projectMemory } from "./memories";
+import { memoryAccess } from "./memories";
 import { workspaceIntelligence } from "./workspace-intelligence";
 import { artifactRegistry } from "./artifact-registry";
 import type { MemoryRecord } from "./types";
@@ -130,7 +130,11 @@ export class ProjectEvolution {
     prompt: string,
     capabilities: string[]
   ): ProjectSnapshot {
-    const memory = projectMemory.all();
+    // Read all memory records via the official MemoryAccess facade.
+    // (Runtime V2 Audit, Phase 2 Step 6 — internal modules must not touch
+    // `projectMemory` directly; they go through `memoryAccess`. The read
+    // is recorded in the audit log with operation="all".)
+    const memory = memoryAccess.all();
     const decisions = this.extractDecisions(memory);
     const artifacts = this.extractArtifacts();
     const workspaceSummary = this.extractWorkspaceSummary();
@@ -172,10 +176,13 @@ export class ProjectEvolution {
     memoryRecords: number;
   } {
     // Restore memory — clear first so we don't merge with stale records
-    // from a different project, then re-write each record.
-    projectMemory.clear();
+    // from a different project, then re-write each record. Both the clear
+    // and the writes go through the MemoryAccess facade so the audit log
+    // captures the full restore operation (operation="clear" followed by
+    // N operation="write" entries with source=record.source).
+    memoryAccess.clear();
     for (const record of snap.memory) {
-      projectMemory.write(
+      memoryAccess.write(
         record.kind,
         record.title,
         record.content,

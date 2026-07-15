@@ -122,6 +122,15 @@ export {
 
 export * from "./types";
 export type { AgentContextBundle } from "./memories";
+// MemoryAccess (Wave 2B) — the official facade for reading/writing memory
+// from internal engine modules. Direct `projectMemory` access is
+// deprecated for engine internals (Runtime V2 Audit, Phase 2 Step 6:
+// "Every agent receives context EXCLUSIVELY through Context Builder.
+// Agents never query memory directly."). `projectMemory` remains
+// exported above for external consumers (debug endpoints, the
+// failure-test harness, the orchestrator during the Wave 2A transition).
+// ADDITIVE — does not modify the existing `projectMemory` export.
+export { MemoryAccess, memoryAccess } from "./memories";
 export type { AgentActivation } from "./agent-runtime";
 
 // Dynamic sub-agent registry (Task J) — capability-based spawn/destroy

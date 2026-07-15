@@ -442,9 +442,11 @@ export class ExecutionEngine {
       }
       const diff = diffParts.join("\n").slice(0, 2000); // cap at 2KB
 
-      // Log the diff to Build Memory via projectMemory
-      const { projectMemory } = await import("./memories");
-      projectMemory.write(
+      // Log the diff to Build Memory via the MemoryAccess facade.
+      // (Runtime V2 Audit, Phase 2 Step 6 — internal modules must not
+      // touch `projectMemory` directly; they go through `memoryAccess`.)
+      const { memoryAccess } = await import("./memories");
+      memoryAccess.write(
         "build",
         `Repair diff: ${firstError.file}`,
         JSON.stringify({

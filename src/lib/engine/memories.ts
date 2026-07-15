@@ -133,6 +133,174 @@ export class ProjectMemoryManager {
 export const projectMemory = new ProjectMemoryManager();
 
 /**
+ * MemoryAccess — the official facade for reading/writing memory.
+ *
+ * All non-memory modules should use `memoryAccess` instead of `projectMemory`
+ * directly. This centralizes memory access for:
+ *   - Audit logging (who wrote what, when)
+ *   - Future access control (which agents can write which memory kinds)
+ *   - Future caching/memoization
+ *
+ * `projectMemory` is still exported for backward compatibility (external
+ * consumers — debug endpoints, failure-tests harness, the orchestrator while
+ * Wave 2A is in flight — still import it from the public API), but INTERNAL
+ * engine modules should migrate to `memoryAccess`.
+ *
+ * Behavior is identical to `projectMemory` — every method delegates to the
+ * underlying `ProjectMemoryManager`. The only addition is an in-memory
+ * `accessLog` that records every read/write/all/clear operation for
+ * debugging and the `/api/debug/memory-readback` audit trail.
+ *
+ * The V2 architecture contract (Runtime V2 Audit, Phase 2 Step 6):
+ *   "Every agent receives context EXCLUSIVELY through Context Builder.
+ *    Agents never query memory directly."
+ *
+ * This facade is the implementation of that contract for WRITES (reads are
+ * already centralized through `ContextBuilder.buildRichContext()`). Until
+ * Wave 2A migrates the orchestrator, `projectMemory` remains importable;
+ * this facade is the target state for all internal modules.
+ */
+export class MemoryAccess {
+  private mem: ProjectMemoryManager;
+  private accessLog: {
+    operation: "read" | "write" | "all" | "clear";
+    kind?: MemoryKind;
+    title?: string;
+    source?: string;
+    timestamp: number;
+  }[] = [];
+
+  constructor(mem: ProjectMemoryManager) {
+    this.mem = mem;
+  }
+
+  /**
+   * Write (or update) a memory record. Logs the operation with the source
+   * (which agent / module wrote it) so the audit trail is self-explanatory.
+   */
+  write(kind: MemoryKind, title: string, content: string, source: string): MemoryRecord {
+    this.accessLog.push({
+      operation: "write",
+      kind,
+      title,
+      source,
+      timestamp: Date.now(),
+    });
+    return this.mem.write(kind, title, content, source);
+  }
+
+  /** Read all records of a given kind. Logs the operation (without source — reads are passive). */
+  read(kind: MemoryKind): MemoryRecord[] {
+    this.accessLog.push({ operation: "read", kind, timestamp: Date.now() });
+    return this.mem.read(kind);
+  }
+
+  /** Read all records across every kind. Logged as an `all` operation. */
+  all(): MemoryRecord[] {
+    this.accessLog.push({ operation: "all", timestamp: Date.now() });
+    return this.mem.all();
+  }
+
+  /** Look up a single record by id. Not logged (point lookups are cheap + frequent). */
+  get(id: string): MemoryRecord | undefined {
+    return this.mem.get(id);
+  }
+
+  /**
+   * Clear all memory records. Used by `ProjectEvolution.restore()` to wipe
+   * stale records before rehydrating from a snapshot. Logged because it is
+   * destructive — the audit trail makes "who cleared memory and when?"
+   * answerable.
+   */
+  clear(): void {
+    this.accessLog.push({ operation: "clear", timestamp: Date.now() });
+    this.mem.clear();
+  }
+
+  /** Pin/unpin a record. Delegates directly (no audit log — admin op). */
+  pin(id: string, pinned: boolean): void {
+    this.mem.pin(id, pinned);
+  }
+
+  /** Pull a role-filtered memory slice for an agent. Delegates directly. */
+  sliceFor(agent: string, kinds: MemoryKind[]): MemoryRecord[] {
+    return this.mem.sliceFor(agent, kinds);
+  }
+
+  /** Highest record version across all memories. Delegates directly. */
+  version(): number {
+    return this.mem.version();
+  }
+
+  /**
+   * Get the access log for debugging/auditing. Returns the most recent
+   * `limit` entries (default 50). Each entry records the operation, the
+   * kind/title/source (for writes), and the timestamp.
+   *
+   * Used by the `/api/debug/memory-readback` endpoint and (in future) by
+   * an observability dashboard to answer "which modules are writing
+   * memory, and when?"
+   */
+  getAccessLog(limit = 50) {
+    return this.accessLog.slice(-limit);
+  }
+
+  /** Clear the access log (for a fresh build / test run). Does NOT clear memory. */
+  clearLog(): void {
+    this.accessLog = [];
+  }
+
+  /**
+   * Convenience for the audit endpoint: summarize the access log by
+   * operation type. Returns counts of read/write/all/clear since the log
+   * was last cleared.
+   */
+  summarizeAccessLog(): {
+    total: number;
+    reads: number;
+    writes: number;
+    alls: number;
+    clears: number;
+    bySource: Record<string, number>;
+    byKind: Record<string, number>;
+  } {
+    const bySource: Record<string, number> = {};
+    const byKind: Record<string, number> = {};
+    let reads = 0;
+    let writes = 0;
+    let alls = 0;
+    let clears = 0;
+    for (const e of this.accessLog) {
+      if (e.operation === "read") reads++;
+      else if (e.operation === "write") writes++;
+      else if (e.operation === "all") alls++;
+      else if (e.operation === "clear") clears++;
+      if (e.source) bySource[e.source] = (bySource[e.source] ?? 0) + 1;
+      if (e.kind) byKind[e.kind] = (byKind[e.kind] ?? 0) + 1;
+    }
+    return {
+      total: this.accessLog.length,
+      reads,
+      writes,
+      alls,
+      clears,
+      bySource,
+      byKind,
+    };
+  }
+}
+
+/**
+ * Process-wide singleton `MemoryAccess` wrapping the shared `projectMemory`.
+ *
+ * This is the OFFICIAL entry point for memory reads/writes from non-memory
+ * engine modules. `projectMemory` remains exported for external consumers
+ * (debug endpoints, the failure-test harness, the orchestrator during the
+ * Wave 2A transition) — internal modules should migrate to `memoryAccess`.
+ */
+export const memoryAccess = new MemoryAccess(projectMemory);
+
+/**
  * AgentContextBundle — the full context package an agent receives.
  *
  * The legacy `buildForAgent()` only returned the memory slice + a placeholder
