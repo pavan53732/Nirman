@@ -30,8 +30,10 @@
 // and the runtime dispatches to the handler here.
 
 import type { AgentHandler, AgentExecutionContext, AgentExecutionResult } from "./agent-contracts";
-import type { PlatformKind } from "./types";
+import type { PlatformKind, AgentRole, ProviderCapability } from "./types";
 import { generateForTarget } from "./generators";
+import { recommendTools, type ToolRecommendation } from "./skill-tool-router";
+import { modelRouter } from "./provider-abstraction";
 
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                    */
@@ -61,6 +63,89 @@ interface FileArtifact {
   path: string;
   content: string;
   language?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Wave 4B — Skill→Tool + Model Router integration                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Structured metadata derived from an agent's injected skills + the Model
+ * Router. Produced by `deriveSkillToolContext()` and consumed by handlers
+ * that want to log/emit skill-driven tool recommendations and the routed
+ * model choice (Runtime V2 Audit, Phase 3 Steps 11 + 12).
+ *
+ * All fields are advisory — handlers ADD them to their output / sharedWrites
+ * for observability; they do NOT replace existing tool-selection logic.
+ */
+interface SkillToolContext {
+  /** IDs of the skills injected into this agent's context. */
+  skillIds: string[];
+  /** Tools recommended by those skills (deduplicated by tool ID). */
+  toolRecommendations: ToolRecommendation[];
+  /**
+   * The model the Model Router selected for this agent's LLM capability, or
+   * null if no connected provider offers an LLM model. When null, the handler
+   * falls back to its pre-Wave-4B behavior (no model choice recorded).
+   */
+  modelChoice: { providerId: string; modelId: string; providerType: string } | null;
+}
+
+/**
+ * Derive skill-driven tool recommendations + the Model Router's model choice
+ * for a given agent execution context.
+ *
+ * This is the Wave 4B integration point:
+ *   - Skills → `recommendTools()` (skill-tool-router.ts) → ToolRecommendation[]
+ *   - Model Router → `modelRouter.select("llm", agent)` → { provider, model } | null
+ *
+ * Pure: reads ctx.skills + ctx.task.agent, returns a structured object. Does
+ * NOT mutate ctx, does NOT throw, does NOT call out to generators or memory.
+ *
+ * @param ctx The agent execution context (must carry `skills` and `task.agent`).
+ * @param capability The provider capability to route for. Defaults to "llm"
+ *                   since most agents need text completion. Generators that
+ *                   produce code may pass "llm" too — image/embedding agents
+ *                   would pass their respective capability.
+ */
+function deriveSkillToolContext(
+  ctx: AgentExecutionContext,
+  capability: ProviderCapability = "llm"
+): SkillToolContext {
+  const skillIds = ctx.skills.map((s) => s.id);
+  const toolRecommendations = recommendTools(skillIds);
+
+  // Model Router integration — agents no longer hardcode model choices.
+  // The router selects an appropriate provider+model for the agent's role
+  // (preferring remote for high-stakes agents, local for low-stakes — see
+  // provider-abstraction.ts). Returns null when no connected provider offers
+  // the capability; the handler treats that as "no recommendation" and
+  // proceeds with its existing default behavior.
+  const routed = modelRouter.select(capability, ctx.task.agent as AgentRole);
+  const modelChoice = routed
+    ? {
+        providerId: routed.provider.id,
+        modelId: routed.model.id,
+        providerType: routed.provider.type,
+      }
+    : null;
+
+  return { skillIds, toolRecommendations, modelChoice };
+}
+
+/**
+ * Format a SkillToolContext as a single human-readable line for inclusion in
+ * an agent's `output` string. Keeps the output compact so existing log
+ * scanners don't break — recommendations are listed by tool ID only.
+ */
+function formatSkillToolLine(stc: SkillToolContext): string {
+  const tools = stc.toolRecommendations.length > 0
+    ? stc.toolRecommendations.map((r) => r.toolId).join(",")
+    : "(none)";
+  const model = stc.modelChoice
+    ? `${stc.modelChoice.providerId}/${stc.modelChoice.modelId} (${stc.modelChoice.providerType})`
+    : "(no-model-routed)";
+  return `skill-tools=[${tools}] model=${model} skills=${stc.skillIds.length}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -285,6 +370,22 @@ const androidGenerator: AgentHandler = (ctx) => {
  * tasks that carry a `toolId`. This handler covers the in-memory case where
  * the orchestrator submits a build task without a toolId — e.g. for trace
  * generation or smoke builds.)
+ *
+ * WAVE 4B — Skill→Tool + Model Router integration (ADDITIVE):
+ *   - Derives tool recommendations from the agent's injected skills via
+ *     `deriveSkillToolContext()` (which calls `recommendTools()` from
+ *     skill-tool-router.ts + `modelRouter.select()` from
+ *     provider-abstraction.ts).
+ *   - Emits an observability event listing the recommended tools.
+ *   - Writes a `build:<target>:skill-tools` shared-context entry capturing
+ *     the structured recommendation+model metadata for downstream agents /
+ *     debug endpoints.
+ *   - EXTENDS the output string with a compact skill-tools+model line.
+ *
+ * Backward compatibility: existing `build:<target>` write and memory write
+ * are unchanged. The skill/model metadata is ADDITIONAL. Existing tool
+ * selection (task.toolId) is preserved — skill recommendations do NOT
+ * override it; they only supplement observability.
  */
 const buildEngineer: AgentHandler = (ctx) => {
   const key = targetKey(ctx);
@@ -295,10 +396,42 @@ const buildEngineer: AgentHandler = (ctx) => {
     fileCount: files.length,
     logs: `Compiled ${files.length} file(s) for ${key}`,
   };
+
+  // ── Wave 4B: skill-driven tool recommendations + Model Router ───────
+  const stc = deriveSkillToolContext(ctx);
+  // Emit an observability event so the runtime can see which tools the
+  // skills recommended for this build (and which model the router chose).
+  // In a full V2 implementation, the handler would invoke each recommended
+  // tool via ToolManager (or the Wave 1B Sandbox) — here we log only, to
+  // preserve the existing in-memory build simulation.
+  if (stc.toolRecommendations.length > 0) {
+    ctx.emit({
+      type: "skill-tool-recommendation",
+      message: `build-engineer: skills recommend tools [${stc.toolRecommendations
+        .map((r) => r.toolId)
+        .join(",")}] for ${key}`,
+      level: "info",
+    });
+  }
+  if (stc.modelChoice) {
+    ctx.emit({
+      type: "model-router-choice",
+      message: `build-engineer: router selected ${stc.modelChoice.providerId}/${stc.modelChoice.modelId}`,
+      level: "info",
+    });
+  }
+
   return {
     status: "success",
-    output: `Build simulated for ${key} (${files.length} file(s), success=${success})`,
-    sharedWrites: [{ key: `build:${key}`, value: buildRecord }],
+    output: `Build simulated for ${key} (${files.length} file(s), success=${success}) | ${formatSkillToolLine(
+      stc
+    )}`,
+    sharedWrites: [
+      { key: `build:${key}`, value: buildRecord },
+      // ADDITIVE: structured skill→tool + model metadata for downstream
+      // consumers (debug endpoints, verification loop, etc.).
+      { key: `build:${key}:skill-tools`, value: stc },
+    ],
     memoryWrites: [
       {
         kind: "build",
@@ -312,6 +445,12 @@ const buildEngineer: AgentHandler = (ctx) => {
 /**
  * Test Generator — reads "code:<target>" and writes a test summary to
  * "tests:<target>".
+ *
+ * WAVE 4B — Skill→Tool + Model Router integration (ADDITIVE):
+ *   Derives tool recommendations + routed model via `deriveSkillToolContext()`
+ *   and appends a compact metadata line to the output. Existing "tests:<target>"
+ *   write is unchanged. The metadata is also written to "tests:<target>:skill-tools"
+ *   so downstream packaging agents can see which validation tools were endorsed.
  */
 const testGenerator: AgentHandler = (ctx) => {
   const key = targetKey(ctx);
@@ -320,16 +459,40 @@ const testGenerator: AgentHandler = (ctx) => {
     testCount: 1,
     files: files.map((f) => ({ path: f.path.replace(/\.tsx?$/, ".test.ts").replace(/\.kt$/, "Test.kt").replace(/\.cs$/, "Tests.cs"), content: `// smoke test for ${f.path}\n` })),
   };
+
+  // ── Wave 4B: skill-driven tool recommendations + Model Router ───────
+  const stc = deriveSkillToolContext(ctx);
+  if (stc.toolRecommendations.length > 0) {
+    ctx.emit({
+      type: "skill-tool-recommendation",
+      message: `test-generator: skills recommend tools [${stc.toolRecommendations
+        .map((r) => r.toolId)
+        .join(",")}] for ${key}`,
+      level: "info",
+    });
+  }
+
   return {
     status: "success",
-    output: `Tests for ${key} (${testRecord.testCount} suite(s), ${testRecord.files.length} source file(s))`,
-    sharedWrites: [{ key: `tests:${key}`, value: testRecord }],
+    output: `Tests for ${key} (${testRecord.testCount} suite(s), ${testRecord.files.length} source file(s)) | ${formatSkillToolLine(
+      stc
+    )}`,
+    sharedWrites: [
+      { key: `tests:${key}`, value: testRecord },
+      // ADDITIVE: skill→tool + model metadata for downstream consumers.
+      { key: `tests:${key}:skill-tools`, value: stc },
+    ],
   };
 };
 
 /**
  * Packaging Engineer — reads "build:<target>" + "tests:<target>" and writes
  * a packaging record to "package:<target>".
+ *
+ * WAVE 4B — Skill→Tool + Model Router integration (ADDITIVE):
+ *   Derives tool recommendations + routed model via `deriveSkillToolContext()`
+ *   and appends a compact metadata line to the output. Existing
+ *   "package:<target>" write is unchanged.
  */
 const packagingEngineer: AgentHandler = (ctx) => {
   const key = targetKey(ctx);
@@ -342,10 +505,29 @@ const packagingEngineer: AgentHandler = (ctx) => {
     testCount: tests?.testCount ?? 0,
     artifactPath: ready ? `dist/${key}-package.zip` : undefined,
   };
+
+  // ── Wave 4B: skill-driven tool recommendations + Model Router ───────
+  const stc = deriveSkillToolContext(ctx);
+  if (stc.toolRecommendations.length > 0) {
+    ctx.emit({
+      type: "skill-tool-recommendation",
+      message: `packaging-engineer: skills recommend tools [${stc.toolRecommendations
+        .map((r) => r.toolId)
+        .join(",")}] for ${key}`,
+      level: "info",
+    });
+  }
+
   return {
     status: "success",
-    output: `Packaged ${key} (build: ${build?.success ? "ok" : "?"}, tests: ${tests?.testCount ?? 0}, ready: ${ready})`,
-    sharedWrites: [{ key: `package:${key}`, value: packageRecord }],
+    output: `Packaged ${key} (build: ${build?.success ? "ok" : "?"}, tests: ${tests?.testCount ?? 0}, ready: ${ready}) | ${formatSkillToolLine(
+      stc
+    )}`,
+    sharedWrites: [
+      { key: `package:${key}`, value: packageRecord },
+      // ADDITIVE: skill→tool + model metadata for downstream consumers.
+      { key: `package:${key}:skill-tools`, value: stc },
+    ],
   };
 };
 

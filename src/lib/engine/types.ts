@@ -334,6 +334,24 @@ export type StageId =
 /** UI-level stage status (distinct from TaskStatus — coarser grained). */
 export type StageStatus = "pending" | "running" | "done" | "failed";
 
+/**
+ * Workflow identifiers.
+ *
+ * Wave 4A (Runtime V2 Migration — Phase 3, Step 10) confirmed all 7+ target
+ * workflows are defined in `data/workflows.ts`:
+ *   - new-project        : full autonomous build from a NL requirement
+ *   - continue-existing  : resume a project from its last checkpoint
+ *   - bug-fix            : diagnose + repair a reported defect
+ *   - refactor           : improve structure without changing behavior
+ *   - add-feature        : extend an existing project with a new capability
+ *   - upgrade-framework  : migrate to a newer framework / dependency version
+ *   - package-project    : produce installers + release artifacts
+ *   - export-project     : export the versioned solution to a local folder
+ *
+ * The WorkflowEngine.select() method (see workflow-engine.ts) routes a natural
+ * language prompt to one of these IDs via a regex pre-pass + signal-based
+ * fallback. See `/api/debug/workflows` for a live demo of the selection.
+ */
 export type WorkflowId =
   | "new-project"
   | "continue-existing"

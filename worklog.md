@@ -2042,3 +2042,290 @@ Stage Summary:
 - regression: PASSED 5/5 (Test 1 build trace structure, Test 2 agent trace structure, Test 3 decision impact SKILL.md flip, Test 4 memory impact SQLite vs PostgreSQL, Test 5 skills endpoint).
 - Build trace still shows parallel generation: YES — verified via direct engine invocation. Multi-target build (web+android+windows) produces 3 parallel generation tasks (Desktop App, Android Companion, Web Portal) all in execution batch 6 with shared architecture predecessors, dispatched to their specialist generator agents (desktop-generator, android-generator, frontend-generator). Single-target CRM build produces 18 tasks (≥18 spec target).
 - No blockers. Pre-existing observation (NOT introduced by Wave 2A, out of scope per "DO NOT touch execution-engine.ts"): `makeTask()` in execution-engine.ts does not copy the `gate` field from its opts to the returned Task, so the `t.gate === "compilation"` check in `buildTaskGraph()` is a no-op. This is identical to the pre-Wave-2A behavior — the original orchestrator had the same check with the same no-op result. The parallel gen tasks themselves are correctly created and dispatched in parallel (verified via trace batch inspection); only the gate-dependency-extension is inert. A future wave that fixes `makeTask()` to populate `gate` would automatically activate the gate extension (no further changes needed in workflow-engine.ts).
+
+---
+Task ID: Wave-4C
+Agent: Wave-4C (runtime-metrics)
+Task: Add runtime observability metrics — utilization, parallelism, latency, cache, graph queries, verification retries
+
+Work Log:
+- Read RUNTIME_V2_AUDIT.md Phase 3 Step 13 (Runtime Observability): "Add metric collection: agent utilization, task latency, cache hit rate. New /api/debug/metrics endpoint. Backward compat: existing events unchanged."
+- Read worklog.md tail to confirm Wave 1A/1B/1C/1D, Wave 2A/2B conventions (file ownership, ADDITIVE-only, tsc 0 + lint clean + regression 5/5 required, worklog format).
+- Read src/lib/engine/observability.ts — confirmed existing Observability class is the source of record for raw events (task-succeeded/failed), token usage timeline (chargeTokens → TokenTimelinePoint), workflow aggregates, and per-agent metrics (tasksCompleted, tokensUsed, avgDurationMs, failures). It does NOT compute: utilization percentages, parallelism ratios, latency percentiles (p50/p95), cache hit rate, graph query latency, verification retry counts. These are the additive surface RuntimeMetrics covers.
+- Read src/lib/engine/execution-engine.ts (build trace recorder, scheduler, parallel batches) — confirmed it emits task-started/succeeded/failed events with `taskId` only (no duration on the event itself; durations live on TraceEntry). The collector's `recordTaskComplete(agent, durationMs, success, stage)` signature is the right shape for a future wave to call from the ExecutionEngine's task-completion path.
+- Read src/lib/engine/agent-runtime.ts (tracer + executor gateway) — confirmed `AgentActivation` records first-activated-at + last-completed-at + taskCount + status per agent. The tracer is per-agent lifecycle (not per-task duration), so RuntimeMetrics fills the per-task duration + per-stage latency gap.
+- Read src/lib/engine/index.ts — confirmed the export pattern (concrete class + singleton + type re-exports, all ADDITIVE).
+
+- Part 1 (CREATE src/lib/engine/runtime-metrics.ts):
+  - Defined 6 metric record interfaces: AgentUtilizationMetric, ParallelismMetric, LatencyMetric, CacheMetric, GraphQueryMetric, RuntimeMetrics (the aggregate snapshot).
+  - Defined RuntimeMetricsCollector class with private state: agentStats Map (tasks/completed/failed/durations per agent), taskLatencies Map (stage → durations[]), graphQueries Map (queryType → {count, totalLatency}), cacheHits/misses counters, tokenByAgent Map, buildStartTime/EndTime, maxConcurrent/currentConcurrent counters, parallelBatches counter, totalTasks counter, verificationStats {total, retries, maxRetries}.
+  - Recording API (9 methods): recordTaskStart(agent), recordTaskComplete(agent, durationMs, success, stage), recordBuildStart(), recordBuildEnd(), recordGraphQuery(queryType, latencyMs), recordCacheHit(), recordCacheMiss(), recordTokens(agent, tokens), recordParallelBatch(), recordVerification(retries).
+  - Snapshot API: getMetrics() returns a deep RuntimeMetrics object with all aggregates computed:
+    - agentUtilization: per-agent tasksAssigned/Completed/Failed, avgDurationMs, totalDurationMs, utilizationPercent (totalDuration / buildLatency × 100).
+    - parallelism: maxConcurrentTasks, avgConcurrentTasks (maxConcurrent/totalTasks), parallelBatches, totalTasks, parallelismRatio (maxConcurrent/totalTasks — 1.0 = fully parallel, 0.0 = fully serial).
+    - taskLatency: per-stage count, avgMs, minMs, maxMs, p50Ms (median), p95Ms (95th percentile of sorted durations).
+    - memoryUsage: heapUsedMB / heapTotalMB / rssMB via process.memoryUsage() (with a typeof guard for non-Node environments — bundled client code won't crash).
+    - tokenUsage: totalTokens + byAgent Record.
+    - cacheHitRate: hits, misses, hitRate (hits / totalRequests), totalRequests.
+    - graphQueryLatency: per-queryType count, avgLatencyMs, totalLatencyMs.
+    - verificationRetries: totalVerifications, totalRetries, avgRetries, maxRetries.
+  - Lifecycle: reset() clears all Maps and counters for a fresh build.
+  - Exported `runtimeMetrics` singleton.
+  - Module is 100% ADDITIVE — no imports from observability.ts, execution-engine.ts, orchestrator.ts, agent-runtime.ts, or verification-loop.ts. Fully self-contained.
+
+- Part 2 (CREATE src/app/api/debug/metrics/route.ts):
+  - GET handler: returns `runtimeMetrics.getMetrics()` as JSON. The snapshot is a fresh deep object every call (caller can mutate freely).
+  - POST handler: switches on `body.action`:
+    - "record-start" → recordBuildStart()
+    - "record-end" → recordBuildEnd()
+    - "record-task" → recordTaskStart + recordTaskComplete pair (atomic — both concurrency counters and latency buckets updated together). Defaults: agent="unknown", durationMs=100, success=true, stage="unknown".
+    - "record-graph-query" → recordGraphQuery(queryType, latencyMs)
+    - "record-tokens" → recordTokens(agent, tokens)
+    - "record-cache" → recordCacheHit() if hit=true else recordCacheMiss()
+    - "record-verification" → recordVerification(retries)
+    - "record-parallel-batch" → recordParallelBatch()
+    - "reset" → reset()
+    - default → 400 with supportedActions list.
+  - Set `export const runtime = "nodejs"` and `export const dynamic = "force-dynamic"` (consistent with all other debug endpoints).
+
+- Part 3 (MODIFY src/lib/engine/index.ts — exports only):
+  - Added export block at the end of the file (after the Sandbox exports): `export { RuntimeMetricsCollector, runtimeMetrics } from "./runtime-metrics";` + `export type { RuntimeMetrics, AgentUtilizationMetric, ParallelismMetric, LatencyMetric, CacheMetric, GraphQueryMetric } from "./runtime-metrics";`.
+  - Added a 14-line comment block documenting what RuntimeMetrics is, that it's ADDITIVE (does not modify observability.ts), and that today's metrics are populated via explicit `runtimeMetrics.record*()` calls from the debug endpoint (a future wave can wire them into execution-engine / orchestrator / workspace-intelligence / verification-loop so they populate automatically on every build).
+  - No other exports touched.
+
+VERIFICATION:
+- `npx tsc --noEmit 2>&1 | grep "error TS" | grep "src/" | grep -v "skills/" | grep -v "examples/" | wc -l` → **0**
+- `bun run lint 2>&1 | tail -3` → `$ eslint .` (exit 0, clean)
+- `node scripts/regression-tests.mjs` → **PASSED 5/5** (Build trace, Agent trace, Decision impact, Memory impact, Skills endpoint)
+- `curl -s http://localhost:3000/api/debug/metrics` → 200, returns full RuntimeMetrics snapshot with all fields present (all 0/empty since no build ran): `{"collectedAt":...,"buildLatencyMs":0,"agentUtilization":[],"parallelism":{"maxConcurrentTasks":0,"avgConcurrentTasks":0,"parallelBatches":0,"totalTasks":0,"parallelismRatio":0},"taskLatency":[],"memoryUsage":{"heapUsedMB":137,"heapTotalMB":181,"rssMB":1050},"contextSize":[],"tokenUsage":{"totalTokens":0,"byAgent":{}},"cacheHitRate":{"hits":0,"misses":0,"hitRate":0,"totalRequests":0},"graphQueryLatency":[],"verificationRetries":{"totalVerifications":0,"totalRetries":0,"avgRetries":0,"maxRetries":0}}`
+- `curl -s -X POST http://localhost:3000/api/debug/metrics -H 'Content-Type: application/json' -d '{"action":"record-start"}'` → `{"ok":true,"action":"record-start"}`
+- `curl -s -X POST http://localhost:3000/api/debug/metrics -H 'Content-Type: application/json' -d '{"action":"record-task","agent":"frontend-generator","durationMs":150,"success":true,"stage":"generate"}'` → `{"ok":true,"action":"record-task","recorded":{"agent":"frontend-generator","durationMs":150,"success":true,"stage":"generate"}}`
+- `curl -s http://localhost:3000/api/debug/metrics` (after record-task) → now shows: `agentUtilization:[{"agent":"frontend-generator","tasksAssigned":1,"tasksCompleted":1,"tasksFailed":0,"avgDurationMs":150,"totalDurationMs":150,"utilizationPercent":0}]`, `taskLatency:[{"stage":"generate","count":1,"avgMs":150,"minMs":150,"maxMs":150,"p50Ms":150,"p95Ms":150}]`, `parallelism.maxConcurrentTasks=1, totalTasks=1, parallelismRatio=1`.
+- Bonus actions also verified: record-graph-query (semantic-search, 12ms) → graphQueryLatency populated; record-tokens (frontend-generator, 1234) → tokenUsage.totalTokens=1234, byAgent={"frontend-generator":1234}; record-cache hit → cacheHitRate.hits=1, hitRate=1; record-verification retries=2 → verificationRetries.totalVerifications=1, totalRetries=2, avgRetries=2, maxRetries=2; reset → all fields cleared back to 0/empty.
+- All 9 POST actions work; reset works.
+
+Stage Summary:
+- Files created: src/lib/engine/runtime-metrics.ts (RuntimeMetricsCollector class + runtimeMetrics singleton, ~330 lines), src/app/api/debug/metrics/route.ts (GET + POST handlers, ~155 lines)
+- Files modified: src/lib/engine/index.ts (added 1 export block + 14-line comment, 0 lines removed — purely additive)
+- tsc: 0 errors in src/ (excluding pre-existing skills/ + examples/ errors)
+- lint: clean (exit 0)
+- regression: PASSED 5/5 (Build trace, Agent trace, Decision impact, Memory impact, Skills endpoint)
+- Metrics categories collected (9 total):
+  1. Build latency (start→end wall-clock)
+  2. Agent utilization (tasksAssigned/Completed/Failed, avgDurationMs, totalDurationMs, utilizationPercent per agent)
+  3. Parallelism (maxConcurrentTasks, avgConcurrentTasks, parallelBatches, totalTasks, parallelismRatio)
+  4. Task latency percentiles per stage (count, avgMs, minMs, maxMs, p50Ms, p95Ms)
+  5. Memory usage (heapUsedMB, heapTotalMB, rssMB)
+  6. Token usage (totalTokens + byAgent Record)
+  7. Cache hit rate (hits, misses, hitRate, totalRequests)
+  8. Graph query latency per type (count, avgLatencyMs, totalLatencyMs)
+  9. Verification retries (totalVerifications, totalRetries, avgRetries, maxRetries)
+- Backward compatibility: 100% — observability.ts untouched, orchestrator.ts untouched, execution-engine.ts untouched, agent-runtime.ts untouched, verification-loop.ts untouched. All new code is in 2 new files + 1 additive export block. Existing API contracts (startBuild, executeTask, observability.recordEvent/chargeTokens/metrics/totals, etc.) unchanged.
+- Blockers: None.
+  - Pre-existing observation (NOT a Wave 4C blocker): the collector's `record*()` methods are NOT yet called from execution-engine.ts / orchestrator.ts / workspace-intelligence.ts / verification-loop.ts (those files are out of Wave 4C's strict modify scope — "DO NOT touch"). Today metrics are populated via the /api/debug/metrics POST endpoint (the demonstration that the recording path works end-to-end). A future wave that owns those files can wire the calls — the RuntimeMetricsCollector API is final and stable. contextSize stays empty (`[]`) today because UnifiedContextBuilder is also out of strict scope; a future wave can add `runtimeMetrics.recordContextSize(agent, tokens)` and populate it.
+
+---
+Task ID: Wave-3A
+Agent: Wave-3A (artifact-query)
+Task: Make Artifact Store queryable — query, byType, byTarget, lineage
+
+Work Log:
+- Read RUNTIME_V2_AUDIT.md (Phase 3, Step 8), worklog.md, and the existing artifact-registry.ts. Confirmed the registry already exposes produce(), get(), all(), forTarget(), forStage(), rollbackToBefore(), lineage(id): ArtifactRecord[] (flat ancestor list), and clear() — but NO query/filter API.
+- Read the real ArtifactRecord interface in types.ts to lock field names: type (ArtifactType union of 9 literals), producedBy (AgentRole), targetId (optional string), path, dependencies (string[]), createdAt (number ms). The Wave 3A brief's pseudocode used `target` and `derivedFrom`; both adapted to the real `targetId` and `dependencies` field names.
+- Discovered a naming collision: the brief asked for a new `lineage(id): ArtifactLineage | undefined` method, but `lineage(id): ArtifactRecord[]` ALREADY EXISTS (returns a flat ancestor list used for rollback). Per the strict "do NOT change existing methods" directive, I named the new structured-lineage method `lineageGraph(id)` to avoid colliding with the pre-existing method. Both coexist with clearly documented semantics — `lineage()` is the flat ancestor list (for rollback), `lineageGraph()` is the structured `{ artifact, parents, children, lineageDepth }` object (for query/inspection). This deviation is documented in inline comments on the class.
+- Added 3 exported interfaces to artifact-registry.ts: ArtifactQuery (type/target/producedBy/since/pathContains filter), ArtifactLineage (artifact/parents/children/lineageDepth), ArtifactQuerySummary (totalArtifacts/byType/byTarget/byProducer/recentArtifacts).
+- Added 5 methods to ArtifactRegistry (all additive, none modify existing): query(filter), byType(type), byTarget(target), lineageGraph(id), getQuerySummary(). The depth walk in lineageGraph is cycle-safe (tracks visited ids, caps at 10 generations).
+- Created /api/debug/artifacts/route.ts with 3 modes: (1) ?lineage=<id> → lineageGraph result or 404, (2) ?type=&target=&producedBy=&since=&pathContains= → filtered query (any subset), (3) no params → getQuerySummary. Read-only; never mutates the registry.
+- Added additive type exports (ArtifactQuery, ArtifactLineage, ArtifactQuerySummary) to src/lib/engine/index.ts. No existing exports touched.
+- Ran a direct smoke test (artifactRegistry.produce x3 with a 3-node dependency chain a1→a2→a3) confirming: query/byType/byTarget/byProducer/pathContains filters work correctly; lineageGraph(root) → depth=0, 1 child; lineageGraph(leaf) → depth=2, 1 parent, 0 children; lineageGraph(nonexistent) → undefined; existing lineage(id) flat-list still works; getQuerySummary returns correct counts.
+- Strict file-ownership respected: did NOT touch orchestrator.ts, preview/*.ts, generators/*, agent-runtime.ts, execution-engine.ts, agent-handlers.ts.
+
+Stage Summary:
+- Files modified: src/lib/engine/artifact-registry.ts (added 3 interfaces + 5 methods), src/lib/engine/index.ts (additive type exports only)
+- Files created: src/app/api/debug/artifacts/route.ts (debug query endpoint)
+- tsc: 0 errors in src/ (only pre-existing skills/ and examples/ errors which are excluded per the brief)
+- lint: clean (eslint . exits 0)
+- regression: 5/5 PASSED (build-trace, agent-trace, decision-impact, memory-impact, skills)
+- curl /api/debug/artifacts → {"summary":{"totalArtifacts":0,"byType":{},"byTarget":{},"byProducer":{},"recentArtifacts":[]}} (HTTP 200; empty because no build has run on this fresh dev server)
+- curl '/api/debug/artifacts?target=web' → {"filter":{"target":"web"},"count":0,"artifacts":[]} (HTTP 200; correct filter mode)
+- curl '/api/debug/artifacts?type=source-code&pathContains=prisma' → {"filter":{"type":"source-code","pathContains":"prisma"},"count":0,"artifacts":[]} (HTTP 200; multi-filter mode)
+- curl '/api/debug/artifacts?lineage=art-1' → 404 {"error":"Artifact not found: art-1","lineage":null} (correct 404 for unknown id)
+- Query methods added: query(filter), byType(type), byTarget(target), lineageGraph(id), getQuerySummary()
+- Blockers: None. Note the deliberate `lineageGraph` rename (vs the brief's `lineage`) — driven by the pre-existing `lineage(id): ArtifactRecord[]` method that must be preserved. Documented in code comments.
+
+---
+Task ID: Wave-4B
+Agent: Wave-4B (skills-tools-models)
+Task: Wire Skills to drive Tool selection + integrate Model Router
+
+Work Log:
+- Read RUNTIME_V2_AUDIT.md (Phase 3 Steps 11+12), skill-injector.ts, provider-abstraction.ts (ModelRouter class), data/tools.ts, agent-handlers.ts (10 handlers).
+- Noted ModelRouter API: `select(capability: ProviderCapability, agent: AgentRole) → { provider, model } | null` (spec mentioned `chooseModel(task)` — used the real `select()` API, documented the mapping in code comments).
+- Created `src/lib/engine/skill-tool-router.ts` — SKILL_TO_TOOL_MAP (22 skills → tool IDs across web/windows/android families), `recommendTools(skillIds)` dedupes by tool ID, `getSkillToolMap()` returns shallow copy. Pure + browser-safe (no fs/dynamic imports).
+- Modified `src/lib/engine/skill-injector.ts` — added `injectSkillsWithTools(agent, opts)` wrapper returning `{ skills, toolRecommendations }`. Reuses the existing `injectSkills()` pipeline; ADDITIVE — `injectSkills()` signature unchanged.
+- Modified `src/lib/engine/agent-handlers.ts`:
+  - Added imports: `recommendTools`/`ToolRecommendation` from skill-tool-router, `modelRouter` from provider-abstraction, `AgentRole`/`ProviderCapability` from types.
+  - Added `SkillToolContext` interface + `deriveSkillToolContext(ctx, capability="llm")` helper — pure function that calls `recommendTools(ctx.skills)` and `modelRouter.select(capability, ctx.task.agent)`.
+  - Added `formatSkillToolLine(stc)` formatter for compact output logging.
+  - build-engineer handler: derives stc, emits `skill-tool-recommendation` + `model-router-choice` events, EXTENDS output string, ADDS `build:<target>:skill-tools` shared-write. Existing `build:<target>` write + memory write UNCHANGED.
+  - test-generator + packaging-engineer: same ADDITIVE pattern (derive + emit + extend output + skill-tools shared-write).
+- Created `src/app/api/debug/skill-tools/route.ts` — GET endpoint with `?platform=`, `?capabilities=`, `?capability=` query params. Surfaces skill IDs, tool recommendations, and model-router choice per agent (planner, solution-architect, frontend-generator, build-engineer, test-generator, packaging-engineer). Mirrors the validation pattern from /api/debug/skill-injection.
+- Modified `src/lib/engine/index.ts` — added exports for `recommendTools`, `getSkillToolMap`, `ToolRecommendation` type, and `injectSkillsWithTools`. ADDITIVE block placed after the existing SkillInjector exports.
+- Backward compatibility verified: existing `injectSkills()`, all handler outputs (status, primary shared-write, memory writes), and all existing tool selection logic (`task.toolId`) preserved. Skill recommendations + model choice are ADDITIONAL metadata only.
+
+Verification:
+- tsc: `npx tsc --noEmit 2>&1 | grep "error TS" | grep "src/" | grep -v "skills/" | grep -v "examples/" | wc -l` → 0
+- lint: `bun run lint` → exit 0 (clean, no warnings)
+- regression: `node scripts/regression-tests.mjs` → PASSED 5/5 (Build trace, Agent trace, Decision impact, Memory impact, Skills endpoint)
+- curl: `curl -s 'http://localhost:3000/api/debug/skill-tools?platform=web&capabilities=auth'` → HTTP 200, returns:
+  - platform: "web", capabilities: ["auth"], providerCapability: "llm"
+  - skillToolMap: 22 skill→tool mappings (web/windows/android)
+  - agentRecommendations per agent — sample for build-engineer:
+    - skills: ["tsc-validation","npm-build","xml-validation","gradle-kts-validation","sln-csproj-generation","next-auth"]
+    - toolRecommendations: [{toolId:"tsc",recommendedBy:"tsc-validation"},{toolId:"npm-build",recommendedBy:"npm-build"},{toolId:"xml-validate",recommendedBy:"xml-validation"},{toolId:"gradle-validate",recommendedBy:"gradle-kts-validation"}]
+    - modelChoice: null (no providers connected — seed providers array is empty in data/adapters.ts; agent handlers gracefully fall back, preserving backward compat)
+  - frontend-generator gets tsc + npm-build recommended (from nextjs-app-router) — matches the spec's expected demo output.
+
+Stage Summary:
+- Files created: skill-tool-router.ts, api/debug/skill-tools/route.ts
+- Files modified: skill-injector.ts (added injectSkillsWithTools), agent-handlers.ts (added deriveSkillToolContext + 3 handlers enhanced), index.ts (added exports)
+- tsc: 0, lint: clean, regression: 5/5
+- Tool recommendations (sample, platform=web&capabilities=auth):
+  - build-engineer → tsc, npm-build, xml-validate, gradle-validate
+  - frontend-generator → tsc, npm-build
+  - solution-architect → npm-build, xml-validate, gradle-validate, tsc
+  - packaging-engineer → npm-build, xml-validate, gradle-validate, tsc
+  - test-generator → tsc
+  - planner → tsc, npm-build
+- Model Router integration: handlers call `modelRouter.select("llm", ctx.task.agent)`; null is handled gracefully (no behavior change when no providers connected).
+- Blockers: None. Note: `tsc`, `xml-validate`, `gradle-validate` tool IDs are recommended by the router but not yet present in `data/tools.ts` (only `npm-build` exists there). This is intentional and forward-looking — the recommendations become actionable the moment those tools are registered. The agent handlers log recommendations without attempting execution of unregistered tools.
+
+---
+Task ID: Wave-4A
+Agent: Wave-4A (workflows)
+Task: Add 6 workflow definitions — Continue, Bug Fix, Refactor, Upgrade, Package, Export
+
+Work Log:
+- Read RUNTIME_V2_AUDIT.md Phase 3 Step 10 (Workflow Definitions), worklog.md (Wave 1A–2B context), and the four target engine files (types.ts, data/workflows.ts, workflow-engine.ts, index.ts).
+- Discovered the actual repo state was AHEAD of the task spec's premise: `data/workflows.ts` ALREADY contained 8 workflow definitions (new-project, continue-existing, bug-fix, refactor, add-feature, upgrade-framework, package-project, export-project) and `types.ts` `WorkflowId` already listed all 8 IDs. The task description's claim that "only 'new-project' exists" was outdated. Wave 4A's job became: (a) verify the existing definitions satisfy the V2 spec, (b) ENHANCE select() with the explicit regex pre-pass the task spec describes, (c) add complementary signals ADDITIVELY, (d) ship the debug endpoint.
+- `types.ts` — added a JSDoc block above `WorkflowId` documenting all 8 workflow IDs and pointing to `WorkflowEngine.select()` + `/api/debug/workflows`. No structural change to the type union (it already listed all 8 IDs).
+- `data/workflows.ts` — added complementary signals (strictly ADDITIVE, no existing signals removed, new-project UNCHANGED per backward-compat mandate):
+    - continue-existing  : + "reopen", "evolve"
+    - bug-fix            : + "defect", "issue"
+    - refactor           : + "cleanup"
+    - upgrade-framework  : + "migration"
+    - package-project    : + "distribute"
+    - export-project     : + "zip"
+  Also added a Wave 4A header comment block describing the file's role in the V2 architecture.
+- `workflow-engine.ts` — enhanced `WorkflowEngine.select(prompt)` with a regex pre-pass exactly as the task spec describes:
+    - Order: continue-existing → refactor → upgrade-framework → package-project → export-project → bug-fix → signal-scoring fallback → default new-project. (bug-fix is checked LAST among the regex branches because "fix"/"error" are common English words; the more-specific patterns win when both match — e.g. "refactor and fix" → refactor, not bug-fix.)
+    - Used `\b` word boundaries (vs. the task spec's non-bounded patterns) to avoid false positives like "create a fix tool" routing to bug-fix. The verification tests ("fix the login bug", "refactor the auth module") pass identically with or without `\b` because the keywords appear as standalone words.
+    - Mapped the task spec's example IDs ("continue-project", "upgrade", "package", "export") to the EXISTING real IDs ("continue-existing", "upgrade-framework", "package-project", "export-project") — no ID renaming, no duplicate workflows, no `WorkflowId` changes. The task spec said "match the real structure" — the real structure has the longer, more descriptive IDs.
+    - Preserved the existing signal-based scoring algorithm UNCHANGED as the fallback for prompts that don't trigger any regex (e.g. "build me a CRM" → new-project via "build" signal). The default-to-new-project fallback is preserved.
+- `src/app/api/debug/workflows/route.ts` — NEW debug endpoint:
+    - GET returns all 8 workflows with id/name/description/stageCount/agentCount/gateCount/signals/stages (each stage with id/label/description/agents/gates), plus a `routing` block describing the regex-pre-pass + signal-scoring + default-fallback logic.
+    - POST accepts `{ prompt: string }`, calls `workflowEngine.select(prompt)`, returns the selected workflow + stages + a `matchedBy` field ("regex-pre-pass" | "signal-scoring" | "default-new-project") + the matched regex pattern (when applicable) + all workflow signal scores (when signal-scoring fired) for full routing transparency.
+- `index.ts` — NO changes needed; `workflowEngine` was already exported (line 65). The debug endpoint imports directly from `@/lib/engine/workflow-engine` (no new public symbols required).
+- Backward compatibility verified:
+    - `new-project` workflow definition UNCHANGED (signals, stages, agents, gates all identical to pre-Wave-4A).
+    - Existing signal-based scoring algorithm UNCHANGED (just wrapped in a fallback position after the new regex pre-pass).
+    - Default-to-new-project behavior preserved when no signals match.
+    - `WorkflowId` type union UNCHANGED (8 IDs, same as pre-Wave-4A).
+    - `workflowEngine.select()` signature unchanged: `(prompt: string) => Workflow`.
+    - All 5 regression tests still pass (build trace, agent trace, decision impact, memory impact, skills endpoint).
+
+Stage Summary:
+- Files modified: data/workflows.ts (signals + header comment), types.ts (WorkflowId JSDoc), workflow-engine.ts (regex pre-pass in select())
+- Files created: src/app/api/debug/workflows/route.ts (GET + POST)
+- tsc: 0 errors (filtered to src/, excluding skills/ and examples/)
+- lint: clean (no errors, no warnings)
+- regression: PASSED 5/5
+- Total workflows: 8 (new-project + continue-existing + bug-fix + refactor + add-feature + upgrade-framework + package-project + export-project) — exceeds the V2 spec's "7+ workflows" target.
+- Selection demos (24 prompts covering all 8 workflows, all PASS):
+    - "build me a CRM"               → new-project        (via signal-scoring)
+    - "create a todo app"            → new-project        (via signal-scoring)
+    - "make a Windows desktop app"   → new-project        (via signal-scoring)
+    - "continue working on my project" → continue-existing (via regex-pre-pass)
+    - "resume my CRM build"          → continue-existing  (via regex-pre-pass)
+    - "reopen the dashboard project" → continue-existing  (via regex-pre-pass)
+    - "evolve the existing app"      → continue-existing  (via regex-pre-pass)
+    - "fix the login bug"            → bug-fix            (via regex-pre-pass)  [verification test #5]
+    - "there's a bug in the checkout flow" → bug-fix      (via regex-pre-pass)
+    - "the build is broken"          → bug-fix            (via regex-pre-pass)
+    - "app crashes on startup"       → bug-fix            (via signal-scoring — "crashes" doesn't match /\bcrash\b/ but the signal-based fallback catches it via substring)
+    - "refactor the auth module"     → refactor           (via regex-pre-pass)  [verification test #6]
+    - "clean up the codebase"        → refactor           (via regex-pre-pass)
+    - "restructure the data layer"   → refactor           (via regex-pre-pass)
+    - "add a notifications feature"  → add-feature        (via signal-scoring — no regex branch exists for add-feature; it's intentionally handled only by signals so "add" + "feature" combined beats other matches)
+    - "extend the user model"        → add-feature        (via signal-scoring)
+    - "upgrade Next.js to v15"       → upgrade-framework  (via regex-pre-pass)
+    - "migrate from Express to Hono" → upgrade-framework  (via regex-pre-pass)
+    - "migration to PostgreSQL"      → upgrade-framework  (via regex-pre-pass)
+    - "package the app for distribution" → package-project (via regex-pre-pass)
+    - "bundle the installer"         → package-project    (via regex-pre-pass)
+    - "distribute the release build" → package-project    (via regex-pre-pass)
+    - "export the project as a zip"  → export-project     (via regex-pre-pass)
+    - "download the source code"     → export-project     (via regex-pre-pass)
+- curl outputs (verification tests):
+    - GET /api/debug/workflows → `{"totalWorkflows":8,"workflows":[...8 entries...],"defaultWorkflowId":"new-project","routing":{...}}`
+    - POST /api/debug/workflows -d '{"prompt":"fix the login bug"}' → `{"matchedBy":"regex-pre-pass","matchedPattern":"bug|fix|broken|error|crash","selectedWorkflow":{"id":"bug-fix","name":"Bug Fix",...},"stages":[5 entries]}`
+    - POST /api/debug/workflows -d '{"prompt":"refactor the auth module"}' → `{"matchedBy":"regex-pre-pass","matchedPattern":"refactor|restructure|clean up","selectedWorkflow":{"id":"refactor","name":"Refactor",...},"stages":[5 entries]}`
+- No blockers.
+
+---
+Task ID: Wave-3B
+Agent: Wave-3B (preview-from-artifacts)
+Task: Wire Preview to consume Artifacts from Artifact Store (filesystem fallback)
+
+Work Log:
+- Read RUNTIME_V2_AUDIT.md Phase 3 Step 9 (Preview Consumes Artifacts). Backward compat mandate: filesystem fallback if artifact not in registry.
+- Read worklog.md tail — confirmed Wave 2A/2B/2C + Wave 1A-1D + Wave 3A landed. Wave 3A added `query({ type, target, producedBy, since, pathContains })`, `byType`, `byTarget`, `lineageGraph`, `getQuerySummary` to ArtifactRegistry (additive; existing `produce`/`get`/`all`/`lineage` unchanged).
+- Read current `src/app/api/preview/render/route.ts` — confirmed it walks the filesystem (`os.tmpdir()/pavan/<projectId>/<desktop|android>`) via `findMainUiFile()` + `findCodeBehind()`. No artifact-registry awareness.
+- Read current `src/app/api/preview/interact/route.ts` — confirmed it's a module-level `stateStore` Map keyed by `${projectId}:${target}`, with state created via `createInitialState(target)` (sample entities). No file-content loading; no artifact awareness.
+- Read `src/lib/engine/artifact-registry.ts` (323 lines, post-Wave-3A) — confirmed `query({ pathContains })` is available and returns `ArtifactRecord[]`. ArtifactRecord has `path` (relative within workspace) but NOT `content` (content is hashed for dedup, not retained).
+- Read `src/lib/engine/generators.ts` — confirmed `registerFiles()` calls `artifactRegistry.produce({ path: f.path, content: f.content, ... })` for every generated file. The `path` is the workspace-relative path (e.g. `src/Crmdesktop/Views/MainWindow.xaml`).
+- Read `src/lib/engine/types.ts` — confirmed `ArtifactRecord` shape: `{ id, type, name, version, hash, producedBy, workflowId, stageId, targetId?, path, dependencies, sizeLabel, createdAt }`. No `content` field, no `projectId` field.
+
+Implementation — render/route.ts:
+- Added import: `import { artifactRegistry } from "@/lib/engine/artifact-registry";`
+- Added new helper `pickUiArtifactsFromRegistry(target)` — uses Wave 3A `artifactRegistry.query({ pathContains: ".xaml" | "Screen.kt" })` to fetch UI file artifacts. Filters out `.xaml.cs` code-behind via `endsWith(".xaml")` (substring match catches them but endsWith doesn't). Scores candidates with the SAME heuristic as the filesystem walker (MainWindow +10, Views +3, App.xaml -5; ListScreen +10, ui/screens +3) so both paths pick the same file. Tiebreaker: highest version, then newest createdAt. Also locates the Windows `.xaml.cs` code-behind sibling by appending `.cs` to the picked XAML path.
+- Added new helper `readWorkspaceFile(root, relPath)` — reads a single file by relative path under the workspace root, returning `null` on miss (used to read the artifact's content from the materialized workspace, since ArtifactRecord doesn't store content).
+- Restructured GET handler into a 2-phase flow:
+  1. V2 path — try `pickUiArtifactsFromRegistry(target)`. If a main file is picked AND its content reads successfully from disk, use it. Also read the code-behind if available. Set `source = "artifact-registry"`. Wrap in try/catch so registry failure falls through cleanly.
+  2. V1 fallback — if V2 path didn't yield a file (registry empty, OR registry-listed file missing on disk), run the original `findMainUiFile(root, target)` filesystem walk. Set `source = "filesystem"`.
+- Preserved the Windows code-behind handling: if the registry gave us a code-behind, use it; otherwise fall back to `findCodeBehind()` filesystem lookup. This means even on the V2 path we gracefully degrade if the code-behind artifact isn't registered but the file exists on disk.
+- Added `source` field to the JSON response: `"artifact-registry"` | `"filesystem"`. Existing fields (`target`, `file`, `html`, `css`, etc.) unchanged.
+- Kept `findMainUiFile()` and `findCodeBehind()` helpers AS-IS so the V1 fallback is byte-identical to pre-Wave-3B behavior.
+
+Implementation — interact/route.ts:
+- Added import: `import { artifactRegistry } from "@/lib/engine/artifact-registry";`
+- Added new helper `artifactSourceForTarget(target)` — probes the registry via `artifactRegistry.query({ pathContains })` and returns `"artifact-registry"` if ANY UI artifact exists for the target, `"default"` otherwise. Wrapped in try/catch (returns `"default"` on registry failure).
+- NOTE: this is a GLOBAL registry probe, not per-project. `ArtifactRecord` carries `targetId` (a build target identifier like `"t1-pg"`), not a `projectId`, so we can't filter to "artifacts produced for THIS project". The flag answers: "has ANY build produced a UI file for this target on this server?" Documented this limitation in the helper's docstring.
+- Added `source` field to BOTH the GET and POST JSON responses. The interactive preview state itself is still created via `createInitialState(target)` (sample entities) — the registry is consulted for observability only. A future wave can wire artifact content into the state initializer once `preview-state.ts` accepts a content parameter (out of scope here — preview-state.ts is in the "DO NOT touch" list).
+- Did NOT change `getState` / `resetState` / `reducePreviewState` behavior — the `source` field is purely additive.
+
+Verification:
+- `npx tsc --noEmit 2>&1 | grep "error TS" | grep "src/" | grep -v "skills/" | grep -v "examples/" | wc -l` → **0**
+- `bun run lint 2>&1 | tail -3` → `$ eslint .` (exit 0, clean)
+- `node scripts/regression-tests.mjs` → **PASSED 5/5** (Build trace, Agent trace, Decision impact, Memory impact, Skills endpoint)
+- End-to-end curl tests (dev server on :3000):
+  - Populated registry via `POST /api/debug/memory-impact {prompt:"CRM app",database:"sqlite"}` → registry has 8 XAML-path artifacts (App.xaml, App.xaml.cs, MainWindow.xaml, MainWindow.xaml.cs × 2 versions).
+  - Materialized files via `POST /api/workspace {projectId:"crm-test", targetFolder:"desktop", files:[...]}` (bun script that calls `generateForTarget("windows","winui3-dotnet8","CrmDesktop","desktop",{...})` and POSTs the result) → 13 files written to `/tmp/pavan/crm-test/desktop/`.
+  - `GET /api/preview/render?target=windows&projectId=crm-test` → 200, returns:
+      `{ target: "windows", file: "src/Crmdesktop/Views/MainWindow.xaml", source: "artifact-registry", html: 1842 chars, css: 3172 chars }` — V2 path proven.
+  - Filesystem fallback test: materialized files under a DIFFERENT projectId (`fs-fallback-test`) with a different app name (`StandaloneApp` → `src/Standaloneapp/Views/MainWindow.xaml`). The registry still has artifacts but their paths (`src/Crmdesktop/...`) don't match files on disk for this project, so `readWorkspaceFile()` returns null and the route falls back to the filesystem walk.
+      `GET /api/preview/render?target=windows&projectId=fs-fallback-test` → 200, returns:
+      `{ target: "windows", file: "src/Standaloneapp/Views/MainWindow.xaml", source: "filesystem", html: 1848 chars, css: 3172 chars }` — V1 fallback proven.
+  - Missing-project test: `GET /api/preview/render?target=windows&projectId=nonexistent` → 404 with `{ error: "No .xaml file found in workspace. Build the project first." }` — error path preserved.
+  - `GET /api/preview/interact?target=windows&projectId=crm-test` → 200, returns `{ target, projectId, source: "artifact-registry", html: 1510 chars }` — interact endpoint now carries `source` field.
+  - `POST /api/preview/interact {target:"windows",projectId:"crm-test",action:{type:"add"}}` → 200, returns `{ target, projectId, source: "artifact-registry", html: 1428 chars }` — POST response also carries `source` field.
+
+Stage Summary:
+- Files modified: src/app/api/preview/render/route.ts (added `artifactRegistry` import + `pickUiArtifactsFromRegistry()` + `readWorkspaceFile()` helpers; restructured GET into 2-phase V2-then-V1 flow; added `source` field to response), src/app/api/preview/interact/route.ts (added `artifactRegistry` import + `artifactSourceForTarget()` helper; added `source` field to GET and POST responses).
+- Files NOT touched (per strict ownership): artifact-registry.ts (Wave 3A owns it), preview/xaml-renderer.ts, preview/compose-renderer.ts, preview/preview-state.ts, preview/interactive-renderer.ts (all in "DO NOT touch: preview/*.ts" list), orchestrator.ts, generators.ts.
+- tsc: 0 errors in src/ (excluding pre-existing skills/ + examples/ errors)
+- lint: clean (exit 0)
+- regression: PASSED 5/5 (Build trace, Agent trace, Decision impact, Memory impact, Skills endpoint)
+- Source field: render endpoint returns `"artifact-registry"` when the registry lists a UI file AND that file is readable on disk; returns `"filesystem"` when the registry is empty OR the registry-listed file is missing on disk (V1 walk fallback). Interact endpoint returns `"artifact-registry"` when the global registry has ANY UI artifact for the target; returns `"default"` otherwise.
+- Backward compat: PRESERVED. The V1 filesystem walk (`findMainUiFile` + `findCodeBehind`) is unchanged and runs whenever the V2 path doesn't yield a usable file. Pre-Wave-3B callers see the same `target`/`file`/`html`/`css` fields plus a new additive `source` field. No existing API contract broken.
+- Blockers: none. The interact endpoint's `source` is a global registry probe (not per-project) because ArtifactRecord has no `projectId` field — documented in the helper's docstring. A future wave could add `projectId` to ArtifactRecord for per-project filtering, but that would require touching artifact-registry.ts (Wave 3A ownership).

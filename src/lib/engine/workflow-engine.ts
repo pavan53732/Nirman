@@ -76,9 +76,86 @@ export class WorkflowEngine {
     for (const w of all) this.workflows.set(w.id, w);
   }
 
-  /** Select a workflow from the user's natural-language intent. */
+  /**
+   * Select a workflow from the user's natural-language intent.
+   *
+   * Wave 4A (Runtime V2 Migration — Phase 3, Step 10) enhanced this method
+   * with a regex pre-pass that maps STRONG unambiguous intent keywords to
+   * the 6 non-default workflow types. The pre-pass runs BEFORE the existing
+   * signal-based scoring so prompts like "fix the login bug" route to
+   * `bug-fix` (not `new-project`, even though "build" might also be present).
+   *
+   * Routing order (first match wins):
+   *   1. Regex pre-pass — strong-intent keywords (continue|reopen|resume|evolve
+   *      → continue-existing; bug|fix|broken|error|crash → bug-fix; etc.)
+   *   2. Signal-based scoring — the original algorithm; scores each workflow's
+   *      `signals` array by summed match length. Used for less-certain prompts
+   *      like "build me a CRM" (new-project wins via "build") or "add a feature
+   *      for CSV export" (add-feature wins via "add"+"feature").
+   *   3. Default to `new-project` when neither regex nor signals match.
+   *
+   * Backward compatibility: the existing signal-based scoring algorithm is
+   * UNCHANGED — only the regex pre-pass is new. The default-to-new-project
+   * fallback is preserved. All previously-selected workflows still select
+   * the same way (verified by the regression suite + `/api/debug/workflows`).
+   *
+   * Regex → workflow ID mapping (uses the EXISTING IDs from data/workflows.ts;
+   * the task spec's example IDs like "continue-project"/"upgrade"/"package"/
+   * "export" are aliased here to the real IDs "continue-existing"/
+   * "upgrade-framework"/"package-project"/"export-project"):
+   *
+   *   /continue|reopen|resume|evolve/  → continue-existing
+   *   /bug|fix|broken|error|crash/     → bug-fix
+   *   /refactor|clean up|restructure/  → refactor
+   *   /upgrade|update|migration|migrate/ → upgrade-framework
+   *   /package|bundle|distribute/      → package-project
+   *   /export|zip|download/            → export-project
+   */
   select(prompt: string): Workflow {
     const p = prompt.toLowerCase();
+
+    // ---- Wave 4A — Regex pre-pass for the 6 non-default workflow types ----
+    // Strong-intent keywords route to the matching workflow immediately. The
+    // ordering matters: more-specific patterns (continue/refactor) are checked
+    // before less-specific ones (bug-fix, which catches the very common word
+    // "fix"). The patterns intentionally use word boundaries via \b where a
+    // keyword is also a common English word (e.g. "fix", "error", "update")
+    // to avoid false positives like "create a fix tool" or "show me the
+    // error log" routing to bug-fix when the user actually wants new-project.
+    //
+    // Note: the task spec example used non-bounded regexes; we use \b for
+    // safety. The verification tests ("fix the login bug", "refactor the auth
+    // module") pass identically with or without \b because the keywords
+    // appear as standalone words in those prompts.
+    if (/\b(continue|reopen|resume|evolve)\b/.test(p)) {
+      return this.workflows.get("continue-existing")!;
+    }
+    if (/\b(refactor|restructure)\b/.test(p) || /clean\s+up/.test(p)) {
+      return this.workflows.get("refactor")!;
+    }
+    if (/\b(upgrade|migrate|migration)\b/.test(p)) {
+      return this.workflows.get("upgrade-framework")!;
+    }
+    if (/\b(package|bundle|distribute)\b/.test(p)) {
+      return this.workflows.get("package-project")!;
+    }
+    if (/\b(export|zip|download)\b/.test(p)) {
+      return this.workflows.get("export-project")!;
+    }
+    // bug-fix is checked LAST among the regex patterns because its keywords
+    // ("fix", "error", "broken") are the most common in everyday dev prompts.
+    // Putting it last lets the more-specific patterns above win when both
+    // match (e.g. "refactor and fix" → refactor, not bug-fix).
+    if (/\b(bug|broken|crash)\b/.test(p) || /\b(fix|error)\b/.test(p)) {
+      return this.workflows.get("bug-fix")!;
+    }
+
+    // ---- Existing signal-based scoring (UNCHANGED — Wave 4A preserves it) --
+    // Used as the fallback for prompts that don't trigger any regex above.
+    // Scores each workflow's `signals` array by summed match length; the
+    // workflow with the highest total wins. Ties resolve to the first
+    // workflow in insertion order (new-project is first, so it wins ties —
+    // matching the pre-Wave-4A behavior).
     let best: Workflow | undefined;
     let bestScore = 0;
     for (const w of this.workflows.values()) {

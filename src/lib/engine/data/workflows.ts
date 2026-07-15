@@ -2,6 +2,26 @@ import type { Workflow, DecisionPolicy } from "../types";
 
 // Workflow Engine — reusable DAGs. The orchestrator selects a workflow from
 // user intent and Project Memory state, then hands it to the Execution Engine.
+//
+// Wave 4A (Runtime V2 Migration — Phase 3, Step 10): the 7+ target workflows
+// required by the V2 architecture are defined below (new-project +
+// continue-existing + bug-fix + refactor + add-feature + upgrade-framework +
+// package-project + export-project = 8 total). Each workflow produces a
+// distinct task graph when compiled by `WorkflowEngine.compile()`.
+//
+// The `signals` array on each workflow is used by `WorkflowEngine.select()`'s
+// signal-based fallback scorer. Wave 4A ADDED complementary signals to the
+// non-new-project workflows (e.g. "reopen"/"evolve" for continue-existing,
+// "migration" for upgrade-framework, "distribute" for package-project,
+// "zip" for export-project, "defect"/"issue" for bug-fix, "cleanup" for
+// refactor) — these are strictly ADDITIVE; no existing signal was removed and
+// the new-project workflow is UNCHANGED (backward-compat mandate).
+//
+// In addition to the signal-based scorer, `WorkflowEngine.select()` now runs
+// a regex pre-pass that maps strong-intent keywords to the 6 non-default
+// workflow types (see workflow-engine.ts). The regex pre-pass + signal-based
+// fallback + "default to new-project" together implement the routing logic
+// demoed by `/api/debug/workflows`.
 export const workflows: Workflow[] = [
   {
     id: "new-project",
@@ -23,7 +43,7 @@ export const workflows: Workflow[] = [
     id: "continue-existing",
     name: "Continue Existing Project",
     description: "Resume a project from its last checkpoint.",
-    signals: ["continue", "resume", "pick up", "keep going"],
+    signals: ["continue", "resume", "pick up", "keep going", "reopen", "evolve"],
     stages: [
       { id: "restore", label: "Restore", description: "Load Project Memory and checkpoints", agents: ["project-memory-manager", "context-builder"], gates: [] },
       { id: "plan", label: "Planning", description: "Plan remaining work", agents: ["planner"], gates: ["architecture"] },
@@ -37,7 +57,7 @@ export const workflows: Workflow[] = [
     id: "bug-fix",
     name: "Bug Fix",
     description: "Diagnose and repair a reported defect.",
-    signals: ["fix", "bug", "broken", "error", "crash", "doesn't work", "failing"],
+    signals: ["fix", "bug", "broken", "error", "crash", "doesn't work", "failing", "defect", "issue"],
     stages: [
       { id: "reproduce", label: "Reproduce", description: "Reproduce the issue", agents: ["code-reviewer", "test-generator"], gates: [] },
       { id: "diagnose", label: "Diagnose", description: "Root-cause analysis", agents: ["code-reviewer", "static-analyzer"], gates: [] },
@@ -50,7 +70,7 @@ export const workflows: Workflow[] = [
     id: "refactor",
     name: "Refactor",
     description: "Improve structure without changing behavior.",
-    signals: ["refactor", "clean up", "restructure", "simplify"],
+    signals: ["refactor", "clean up", "restructure", "simplify", "cleanup"],
     stages: [
       { id: "analyze", label: "Analyze", description: "Map current structure", agents: ["software-architect", "static-analyzer"], gates: [] },
       { id: "plan", label: "Plan", description: "Plan safe refactors", agents: ["refactoring-agent"], gates: ["architecture"] },
@@ -78,7 +98,7 @@ export const workflows: Workflow[] = [
     id: "upgrade-framework",
     name: "Upgrade Framework",
     description: "Migrate to a newer framework/version.",
-    signals: ["upgrade", "migrate", "update framework", "newer version"],
+    signals: ["upgrade", "migrate", "update framework", "newer version", "migration"],
     stages: [
       { id: "assess", label: "Assess", description: "Assess upgrade impact", agents: ["migration-agent", "dependency-auditor"], gates: [] },
       { id: "plan", label: "Plan", description: "Plan migration", agents: ["migration-agent"], gates: ["architecture"] },
@@ -91,7 +111,7 @@ export const workflows: Workflow[] = [
     id: "package-project",
     name: "Package Project",
     description: "Produce installers and release artifacts.",
-    signals: ["package", "bundle", "installer", "release build"],
+    signals: ["package", "bundle", "installer", "release build", "distribute"],
     stages: [
       { id: "validate", label: "Validate", description: "Ensure gates pass", agents: ["static-analyzer"], gates: ["compilation", "security"] },
       { id: "package", label: "Packaging", description: "Build installers", agents: ["packaging-engineer", "installer-specialist"], gates: ["packaging"] },
@@ -103,7 +123,7 @@ export const workflows: Workflow[] = [
     id: "export-project",
     name: "Export Project",
     description: "Export the complete versioned solution to a local folder.",
-    signals: ["export", "download", "save to folder", "save to disk"],
+    signals: ["export", "download", "save to folder", "save to disk", "zip"],
     stages: [
       { id: "validate-path", label: "Validate Path", description: "Validate the chosen export path", agents: ["export-manager"], gates: [] },
       { id: "bundle", label: "Bundle", description: "Assemble /backend /desktop /android /web-admin /docs /artifacts + DecisionLog.json", agents: ["export-manager", "artifact-manager"], gates: [] },

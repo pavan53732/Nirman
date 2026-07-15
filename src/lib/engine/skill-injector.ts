@@ -35,6 +35,7 @@
 import type { SkillContent } from "./agent-contracts";
 import type { AgentRole, PlatformKind, Capability } from "./types";
 import { SKILLS } from "./skills/registry";
+import { recommendTools, type ToolRecommendation } from "./skill-tool-router";
 
 /**
  * Agent role → list of skill IDs the agent should receive.
@@ -155,6 +156,39 @@ export function injectSkills(
   return allSkillIds
     .map((id) => loadSkillContent(id, agent as AgentRole))
     .filter((s): s is SkillContent => s !== null);
+}
+
+/**
+ * Inject skills AND derive tool recommendations in one call.
+ *
+ * This is the Wave 4B entry point (Runtime V2 Audit, Phase 3 Step 11):
+ *   "Agent reads Skills → reasons → chooses Tool → executes Tool."
+ *
+ * Returns the SkillContent[] (as `injectSkills` does) PLUS a list of
+ * ToolRecommendation[] derived from those skill IDs via the SkillToolRouter.
+ * Agents that want skill-driven tool selection call this once and use both
+ * fields; agents that only want skills can still call `injectSkills`.
+ *
+ * ADDITIVE — does not modify `injectSkills`. The two functions share the
+ * same skill-loading pipeline; this wrapper simply feeds the resulting IDs
+ * through `recommendTools()` from skill-tool-router.ts.
+ *
+ * @example
+ *   const { skills, toolRecommendations } = injectSkillsWithTools(
+ *     "build-engineer",
+ *     { platform: "web", capabilities: ["auth"] }
+ *   );
+ *   // skills: SkillContent[]
+ *   // toolRecommendations: [{ toolId: "tsc", recommendedBy: "tsc-validation" }, ...]
+ */
+export function injectSkillsWithTools(
+  agent: string,
+  opts: { platform?: PlatformKind; capabilities?: Capability[] } = {}
+): { skills: SkillContent[]; toolRecommendations: ToolRecommendation[] } {
+  const skills = injectSkills(agent, opts);
+  const skillIds = skills.map((s) => s.id);
+  const toolRecommendations = recommendTools(skillIds);
+  return { skills, toolRecommendations };
 }
 
 /**

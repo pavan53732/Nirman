@@ -169,12 +169,27 @@ export type {
 // Task L symbols above.
 export {
   injectSkills,
+  injectSkillsWithTools,
   getInjectionPlan,
   enrichSkillsWithLoaderContent,
   getAgentSkillMap,
   getCapabilitySkillMap,
   getSkillFolder,
 } from "./skill-injector";
+
+// SkillToolRouter (Wave 4B) — maps injected skills to recommended tools. When
+// a skill is injected into an agent's context, it may recommend specific
+// tools the agent should use. This module provides that mapping plus a
+// `recommendTools()` function that deduplicates recommendations by tool ID.
+// Used by the agent handlers (agent-handlers.ts) to drive tool selection
+// based on the agent's injected skills. ADDITIVE — does not modify the
+// SkillInjector or any existing tool selection logic; recommendations are
+// advisory and supplement (not replace) existing tool selection.
+export {
+  recommendTools,
+  getSkillToolMap,
+} from "./skill-tool-router";
+export type { ToolRecommendation } from "./skill-tool-router";
 
 // WorkspaceIntelligence (Task P) — indexes generated files into 4 graphs
 // (semantic index, symbol graph, dependency graph, architecture graph) so
@@ -352,3 +367,42 @@ export type {
   SandboxLog,
   SandboxOptions,
 } from "./sandbox";
+
+// Artifact Store Query API (Wave 3A, Runtime V2 Migration Step 8) — makes the
+// ArtifactRegistry queryable. The registry already had `produce()` / `get()`
+// / `all()` / `lineage()` (flat ancestor list); Wave 3A adds `query(filter)`,
+// `byType(type)`, `byTarget(target)`, `lineageGraph(id)` (structured
+// `{ artifact, parents, children, lineageDepth }`), and `getQuerySummary()`.
+// Existing methods are UNCHANGED (no breaking modifications) — the new
+// structured-lineage method lives under a new name to avoid colliding with
+// the pre-existing flat-list `lineage(id)` method. ADDITIVE — does not modify
+// any other engine file (orchestrator, agent-runtime, preview, generators).
+export type {
+  ArtifactQuery,
+  ArtifactLineage,
+  ArtifactQuerySummary,
+} from "./artifact-registry";
+
+// Runtime Metrics (Wave 4C) — collects AGGREGATE diagnostics for optimization:
+// agent utilization (% of build time each agent was active), parallelism
+// (max/avg concurrent tasks, parallelism ratio), task latency percentiles
+// (p50/p95 per stage), build latency end-to-end, memory usage (heap/rss),
+// token usage by agent, cache hit rate, workspace-graph query latency, and
+// verification retry counts. ADDITIVE — does NOT modify observability.ts
+// (the existing event recorder / token timeline / workflow aggregates are
+// the source of record for raw events; RuntimeMetrics is a separate
+// collector focused on aggregate dashboards). Exposed via the
+// /api/debug/metrics endpoint. Today metrics are populated via explicit
+// `runtimeMetrics.record*()` calls from the debug endpoint; a future wave
+// can wire these calls into execution-engine / orchestrator / workspace-
+// intelligence / verification-loop so they populate automatically on every
+// build.
+export { RuntimeMetricsCollector, runtimeMetrics } from "./runtime-metrics";
+export type {
+  RuntimeMetrics,
+  AgentUtilizationMetric,
+  ParallelismMetric,
+  LatencyMetric,
+  CacheMetric,
+  GraphQueryMetric,
+} from "./runtime-metrics";

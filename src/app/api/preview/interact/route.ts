@@ -7,6 +7,7 @@ import {
   type PreviewTarget,
 } from "@/lib/preview/preview-state";
 import { renderInteractive } from "@/lib/preview/interactive-renderer";
+import { artifactRegistry } from "@/lib/engine/artifact-registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,6 +44,42 @@ function isPreviewTarget(value: string | null | undefined): value is PreviewTarg
 }
 
 /**
+ * Determine whether the Artifact Registry has any UI artifacts for the given
+ * target. Used to annotate the interactive preview response with a `source`
+ * field mirroring the /api/preview/render endpoint.
+ *
+ * NOTE: this is a GLOBAL registry probe (not per-project). ArtifactRecord
+ * carries `targetId` (a build target identifier like "t1-pg"), not a
+ * projectId, so we can't filter to "artifacts produced for THIS project".
+ * The flag therefore answers: "has ANY build produced a UI file for this
+ * target on this server?" — useful as an at-a-glance V2-readiness indicator.
+ *
+ * The interactive preview state itself is still created via
+ * `createInitialState(target)` (sample entities) — the registry is consulted
+ * for observability only. A future wave can wire artifact content into the
+ * state initializer once `preview-state.ts` accepts a content parameter
+ * (out of scope here — preview-state.ts is in the "DO NOT touch" list).
+ */
+function artifactSourceForTarget(
+  target: PreviewTarget,
+): "artifact-registry" | "default" {
+  try {
+    const matches =
+      target === "windows"
+        ? artifactRegistry.query({ pathContains: ".xaml" })
+        : artifactRegistry.query({ pathContains: "Screen.kt" });
+    // For Windows, exclude .xaml.cs code-behind files (substring match catches
+    // them but endsWith(".xaml") does not).
+    const has = matches.some((a) =>
+      target === "windows" ? a.path.endsWith(".xaml") : true,
+    );
+    return has ? "artifact-registry" : "default";
+  } catch {
+    return "default";
+  }
+}
+
+/**
  * GET /api/preview/interact?target=windows|android&projectId=<id>[&reset=1]
  *
  * Returns the current interactive preview (HTML + CSS + state). If `reset=1`
@@ -64,7 +101,8 @@ export async function GET(req: Request) {
 
   const state = reset ? resetState(projectId, targetRaw) : getState(projectId, targetRaw);
   const preview = renderInteractive(state);
-  return NextResponse.json({ ...preview, projectId, target: targetRaw });
+  const source = artifactSourceForTarget(targetRaw);
+  return NextResponse.json({ ...preview, projectId, target: targetRaw, source });
 }
 
 /**
@@ -104,7 +142,8 @@ export async function POST(req: Request) {
     stateStore.set(stateKey(projectId, targetRaw), newState);
 
     const preview = renderInteractive(newState);
-    return NextResponse.json({ ...preview, projectId, target: targetRaw });
+    const source = artifactSourceForTarget(targetRaw);
+    return NextResponse.json({ ...preview, projectId, target: targetRaw, source });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
