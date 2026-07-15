@@ -1,7 +1,12 @@
 "use client";
 
 import { useApp } from "@/lib/store";
+<<<<<<< HEAD
 import { agents, stageAgentMap } from "@/lib/engine/client";
+=======
+import { stageAgentMap } from "@/lib/engine/data/skills";
+import { agents } from "@/lib/engine/data/agents";
+>>>>>>> 6cd3275feb2c9061668cda39cc2f099425e3ba73
 import { cn } from "@/lib/utils";
 import { Check, Loader2, Circle, AlertCircle } from "lucide-react";
 import type { StageStatus, AgentRole } from "@/lib/types";

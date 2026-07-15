@@ -8,7 +8,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Bot, User, Sparkles, Loader2, ArrowUp, CheckCircle2 } from "lucide-react";
 import { starterSuggestions } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
+<<<<<<< HEAD
 import { detectAmbiguity, AMBIGUITY_THRESHOLD, detectTargets } from "@/lib/engine/client";
+=======
+import { detectAmbiguity, AMBIGUITY_THRESHOLD } from "@/lib/engine/skills/ambiguity-detector";
+import { detectTargets } from "@/lib/engine/orchestrator";
+>>>>>>> 6cd3275feb2c9061668cda39cc2f099425e3ba73
 
 const suggestionIcons: Record<string, string> = {
   monitor: "🖥️",

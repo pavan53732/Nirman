@@ -1,0 +1,11 @@
+/home/z/my-project/src-tauri/target/debug/deps/unic_common-2f9b202e3c1ff564.d: /home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/lib.rs /home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/pkg_info.rs /home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/version.rs
+
+/home/z/my-project/src-tauri/target/debug/deps/libunic_common-2f9b202e3c1ff564.rmeta: /home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/lib.rs /home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/pkg_info.rs /home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/version.rs
+
+/home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/lib.rs:
+/home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/pkg_info.rs:
+/home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unic-common-0.9.0/src/version.rs:
+
+# env-dep:CARGO_PKG_DESCRIPTION=UNIC — Common Utilities
+# env-dep:CARGO_PKG_NAME=unic-common
+# env-dep:CARGO_PKG_VERSION=0.9.0
