@@ -2500,3 +2500,31 @@ Stage Summary:
     4. Deadline-aware — autoAssignPriorities() marks compilation gates as "critical" and adds them to the criticalPath set; recommendOrder() puts critical tasks first so they don't wait behind lower-priority work.
 - Backward compatibility: PRESERVED. The SmartScheduler is purely advisory — it does NOT replace or modify the ExecutionEngine. Default config (baseMaxParallel=4) matches the engine's existing maxParallel=4 so behavior is identical to pre-Depth-5 when no scheduler signals are populated. The `smartScheduler` singleton is created at module load but nothing consumes it until the debug endpoint is called or a future wave wires it into the engine's trySchedule() loop.
 - Blockers: none. Two pre-existing quirks worked around without touching off-limits files: (a) makeTask() doesn't copy opts.gate to the returned Task — workaround sets `.gate` manually in the demo route; (b) tool-intelligence.ts (Depth 4) is not consumed by SmartScheduler — a future wave can wire them together (e.g., feed `toolIntelligence.recommend(toolId).expectedDurationMs` into `SmartScheduler.estimateDuration()`) without breaking either module.
+
+---
+Task ID: Depth Improvements Complete (1-5)
+Agent: Z.ai Code (main)
+Task: Implement 5 depth improvements — negotiation, long-run, learning, tool intelligence, smart scheduling
+
+Work Log:
+- (1) Created model-router.ts facade for discoverability (Model Router was in provider-abstraction.ts)
+- (2) Dispatched 5 parallel subagents for the depth improvements
+- (3) All 5 completed successfully (3 hit max-turns during verification but files were written correctly)
+
+Stage Summary — ALL 5 DEPTH IMPROVEMENTS DELIVERED:
+
+1. Agent Negotiation: 4-party consensus (producer + security + architecture + performance reviewers)
+2. Long-Running Execution: pause/resume/checkpoint/recover with localStorage persistence
+3. Runtime Learning: cross-project knowledge with confidence scoring (9 demo learnings)
+4. Tool Intelligence: per-tool stats (duration, success rate, reliability) + optimal ordering
+5. Smart Scheduler: priority scheduling + resource-aware parallelism + adaptive concurrency
+
+Live Verification:
+- Regression: PASSED 5/5
+- Negotiation: 4 participants, consensus reached
+- Long-run: start→checkpoint→pause→resume cycle proven
+- Learning: 9 learnings, web stack recommended (confidence 0.7)
+- Tool intelligence: 4 tools tracked, optimal order computed
+- Smart scheduler: priorities auto-assigned, concurrency adapts to memory+tool speed
+
+Committed as a9f5066, pushed to origin/main.
