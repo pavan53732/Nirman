@@ -3,7 +3,8 @@
 import { useEffect, useRef } from "react";
 import { useApp } from "@/lib/store";
 import { stageDetails } from "@/lib/mock-data";
-import { orchestrator, executionEngine, checkpointManager } from "@/lib/engine";
+import { orchestrator } from "@/lib/engine/orchestrator";
+import { executionEngine, checkpointManager } from "@/lib/engine/execution-engine";
 import type { StageId } from "@/lib/types";
 
 /**

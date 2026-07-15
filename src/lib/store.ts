@@ -22,7 +22,13 @@ import {
   stageDetails,
   makeArtifacts,
 } from "./mock-data";
-import { orchestrator, detectTargets, detectNonFunctionals, executionEngine, checkpointManager } from "./engine";
+// Import directly from specific modules instead of the barrel (./engine)
+// to avoid pulling the entire 50+ module engine graph into the client bundle.
+// The barrel exports server-only modules (sandbox, tool-intelligence, etc.)
+// that cause Turbopack OOM during client compilation.
+import { orchestrator, detectTargets } from "./engine/orchestrator";
+import { detectNonFunctionals } from "./engine/decision-engine";
+import { executionEngine, checkpointManager } from "./engine/execution-engine";
 
 interface AppState {
   // data

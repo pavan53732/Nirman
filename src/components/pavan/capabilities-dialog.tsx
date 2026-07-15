@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { useApp } from "@/lib/store";
-import { skills, skillCategories, agents, stageAgentMap } from "@/lib/engine";
+import { skills, skillCategories, stageAgentMap } from "@/lib/engine/data/skills";
+import { agents } from "@/lib/engine/data/agents";
 import {
   Dialog,
   DialogContent,

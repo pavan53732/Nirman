@@ -4,7 +4,13 @@
 // android → FROM openjdk:17 + Android SDK command-line tools
 
 import type { VirtualFile } from "../generators";
-import type { TargetSpec } from "../types";
+import type { PlatformKind } from "../types";
+
+export interface TargetSpec {
+  kind: PlatformKind;
+  label: string;
+  stack: string;
+}
 
 export function generateDocker(projectName: string, targets: TargetSpec[]): VirtualFile[] {
   const files: VirtualFile[] = [];

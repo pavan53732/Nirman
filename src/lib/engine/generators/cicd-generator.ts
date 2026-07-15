@@ -3,7 +3,13 @@
 // android (./gradlew assembleDebug). Real YAML, no placeholder.
 
 import type { VirtualFile } from "../generators";
-import type { TargetSpec } from "../types";
+import type { PlatformKind } from "../types";
+
+export interface TargetSpec {
+  kind: PlatformKind;
+  label: string;
+  stack: string;
+}
 
 export function generateCICD(projectName: string, targets: TargetSpec[]): VirtualFile[] {
   const hasWeb = targets.some((t) => t.kind === "web");

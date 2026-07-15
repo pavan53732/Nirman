@@ -12,7 +12,11 @@
 // proceeds autonomously.
 
 import type { EngineEvent } from "../types";
-import { executionEngine, observability } from "../index";
+// Import directly from specific modules, NOT from the barrel (../index).
+// The barrel exports server-only modules (skills/loader.ts uses `fs`)
+// that crash the browser bundle when pulled in transitively.
+import { executionEngine } from "../execution-engine";
+import { observability } from "../observability";
 
 /** grep-able constant — the ambiguity threshold above which the engine asks. */
 export const AMBIGUITY_THRESHOLD = 0.75;

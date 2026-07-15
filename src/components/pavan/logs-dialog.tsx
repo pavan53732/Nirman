@@ -11,7 +11,9 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import type { LogLine } from "@/lib/types";
-import { checkpointManager, isIndexedDBAvailable, observability } from "@/lib/engine";
+import { checkpointManager } from "@/lib/engine/execution-engine";
+import { isIndexedDBAvailable } from "@/lib/engine/idb";
+import { observability } from "@/lib/engine/observability";
 import { Button } from "@/components/ui/button";
 import { RotateCcw, Database, Coins, Zap } from "lucide-react";
 

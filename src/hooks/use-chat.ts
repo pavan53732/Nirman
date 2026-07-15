@@ -89,7 +89,11 @@ export function useChat() {
 
         // Charge real tokens to observability + cost optimizer
         if (realTokens > 0) {
-          const { observability, tokenBudgetManager } = await import("@/lib/engine");
+          // Import directly from specific modules to avoid pulling the entire
+          // engine barrel (which includes server-only modules like skills/loader.ts
+          // that use `fs` and crash the browser bundle).
+          const { observability } = await import("@/lib/engine/observability");
+          const { tokenBudgetManager } = await import("@/lib/engine/provider-abstraction");
           observability.chargeTokens("planner", realTokens, "new-project");
           tokenBudgetManager.charge("planner", "new-project", realTokens);
           addLog("info", "provider", `Chat used ${realTokens} tokens (real usage from provider)`);

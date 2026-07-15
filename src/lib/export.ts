@@ -7,7 +7,13 @@
 
 import type { ProjectMeta, ProjectKind } from "./types";
 import type { PlatformKind } from "./engine/types";
-import { artifactRegistry, projectMemory, registries, generateForTarget, detectCapabilities, detectNonFunctionals } from "./engine";
+// Import directly from specific modules to avoid pulling the engine barrel
+// (which includes server-only modules like skills/loader.ts that use `fs`).
+import { artifactRegistry } from "./engine/artifact-registry";
+import { projectMemory } from "./engine/memories";
+import { registries } from "./engine/registries";
+import { generateForTarget } from "./engine/generators";
+import { detectCapabilities, detectNonFunctionals } from "./engine/decision-engine";
 
 export interface ExportResult {
   ok: boolean;
